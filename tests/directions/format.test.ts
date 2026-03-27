@@ -42,15 +42,17 @@ const coords: Coordinate[] = [
 ];
 
 describe("formatDirections", () => {
-  it("includes the intersection name in header", () => {
+  it("starts with the directions header", () => {
     const result = formatDirections(intersection, destination, route, coords);
-    expect(result).toContain("Main St & Oak Ave");
+    expect(result.startsWith("DIRECTIONS from Main St & Oak Ave, Fort Worth, TX 76101 to 33.005, -96.995")).toBe(true);
   });
 
-  it("includes county and city", () => {
+  it("does not include the old county/city/intersection header block", () => {
     const result = formatDirections(intersection, destination, route, coords);
-    expect(result).toContain("Tarrant");
-    expect(result).toContain("Fort Worth");
+    expect(result).not.toContain("COUNTY");
+    expect(result).not.toContain("CITY");
+    expect(result).not.toContain("INTERSECTION:");
+    expect(result).not.toContain("*************************");
   });
 
   it("includes numbered step instructions", () => {
@@ -95,5 +97,19 @@ describe("formatMarkingText", () => {
   it("includes point count in header", () => {
     const result = formatMarkingText(coords);
     expect(result).toContain("4 points");
+  });
+
+  it("ignores a duplicate closing point when looping back to the start", () => {
+    const closedCoords: Coordinate[] = [
+      ...coords,
+      coords[0],
+    ];
+
+    const result = formatMarkingText(closedCoords);
+    const toStartMatches = result.match(/to 33, -97/g) ?? [];
+
+    expect(result).toContain("WORK AREA BOUNDARIES (4 points)");
+    expect(result).not.toMatch(/0 ft to 33, -97/);
+    expect(toStartMatches).toHaveLength(1);
   });
 });

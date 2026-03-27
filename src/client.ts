@@ -20,6 +20,36 @@ import { geoMeasure } from "./geo/measure.js";
 import { formatDirections, formatMarkingText } from "./directions/format.js";
 import { polygonAreaAcres, boundingBoxFeet } from "./geo/area.js";
 
+function coordinatesEqual(a: Coordinate, b: Coordinate): boolean {
+  return a.lat === b.lat && a.lng === b.lng;
+}
+
+function rotateCoordinatesToStart(
+  coordinates: Coordinate[],
+  start: Coordinate
+): Coordinate[] {
+  if (coordinates.length === 0) return [];
+
+  const isClosed =
+    coordinates.length > 1 &&
+    coordinatesEqual(coordinates[0], coordinates[coordinates.length - 1]);
+  const openCoordinates = isClosed ? coordinates.slice(0, -1) : coordinates.slice();
+  const startIndex = openCoordinates.findIndex((coord) => coordinatesEqual(coord, start));
+
+  if (startIndex <= 0) {
+    return isClosed
+      ? [...openCoordinates, openCoordinates[0]]
+      : openCoordinates;
+  }
+
+  const rotated = [
+    ...openCoordinates.slice(startIndex),
+    ...openCoordinates.slice(0, startIndex),
+  ];
+
+  return isClosed ? [...rotated, rotated[0]] : rotated;
+}
+
 function extractTurnStreets(steps: RouteResult["steps"]): { from: string | null; onto: string | null } {
   for (let i = steps.length - 1; i >= 0; i--) {
     const maneuver = steps[i].navigationInstruction?.maneuver ?? "";
@@ -184,10 +214,12 @@ export class TicketGeoClient {
       }
     }
     if (!bestOriginal) throw new Error("Could not find nearest boundary point");
+    const orderedCoordinates = rotateCoordinatesToStart(coordinates, bestOriginal);
+    const startCoordinate = orderedCoordinates[0];
 
     // Step 5: Compute final route
-    const { bearingDegrees: heading } = geoMeasure(intersection, bestOriginal);
-    const routeResult = await this.computeRoute(intersection, bestOriginal, heading);
+    const { bearingDegrees: heading } = geoMeasure(intersection, startCoordinate);
+    const routeResult = await this.computeRoute(intersection, startCoordinate, heading);
     if (!routeResult) throw new Error("Could not compute route from intersection to site");
 
     // Step 6: Fallback street name extraction
@@ -209,13 +241,13 @@ export class TicketGeoClient {
     }
 
     // Step 7: Format output
-    const directionsText = formatDirections(intersection, bestOriginal, routeResult, coordinates);
-    const markingText = formatMarkingText(coordinates);
-    const areaAcres = polygonAreaAcres(coordinates);
-    const boundingBox = boundingBoxFeet(coordinates);
+    const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates);
+    const markingText = formatMarkingText(orderedCoordinates);
+    const areaAcres = polygonAreaAcres(orderedCoordinates);
+    const boundingBox = boundingBoxFeet(orderedCoordinates);
 
     return {
-      coordinates,
+      coordinates: orderedCoordinates,
       intersection,
       directionsText,
       markingText,

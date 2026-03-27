@@ -26,35 +26,34 @@ function replaceCardinal(text: string, replacement: string): string {
   return text;
 }
 
+function coordinatesEqual(a: Coordinate, b: Coordinate): boolean {
+  return a.lat === b.lat && a.lng === b.lng;
+}
+
+function normalizeLoopCoordinates(coordinates: Coordinate[]): Coordinate[] {
+  if (
+    coordinates.length > 1 &&
+    coordinatesEqual(coordinates[0], coordinates[coordinates.length - 1])
+  ) {
+    return coordinates.slice(0, -1);
+  }
+
+  return coordinates;
+}
+
 export function formatDirections(
   intersection: Intersection,
   destination: Coordinate,
   route: RouteResult,
   coordinates: Coordinate[]
 ): string {
-  const { county, city, stateCode, zip, name } = intersection;
+  const { city, stateCode, zip, name } = intersection;
 
   const addressParts = [name];
   if (city) addressParts.push(city);
   if (stateCode && zip) addressParts.push(`${stateCode} ${zip}`);
   else if (stateCode) addressParts.push(stateCode);
   const directionsFrom = addressParts.join(", ");
-
-  const headerLines = [
-    "*************************",
-    "COUNTY",
-    county,
-    "",
-    "*************************",
-    "CITY",
-    city,
-    "",
-    "*************************",
-    "INTERSECTION:",
-    name,
-    "",
-    "*************************",
-  ];
 
   const directionsLines = [
     `DIRECTIONS from ${directionsFrom} to ${destination.lat}, ${destination.lng}`,
@@ -106,22 +105,22 @@ export function formatDirections(
   directionsLines.push("Important Mark Utilities along and within the polygon boundary.");
   directionsLines.push("Bounding box dimensions are for reference only - use polygon coordinates below.");
 
-  return headerLines.join("\n") + "\n" + directionsLines.join("\n");
+  return directionsLines.join("\n");
 }
 
 export function formatMarkingText(coordinates: Coordinate[]): string {
-  const n = coordinates.length;
+  const loopCoordinates = normalizeLoopCoordinates(coordinates);
+  const n = loopCoordinates.length;
   const lines = [
-    "*************************",
     `WORK AREA BOUNDARIES (${n} points)`,
   ];
 
-  const start = coordinates[0];
+  const start = loopCoordinates[0];
   lines.push(`Start: ${start.lat}, ${start.lng}`);
 
   for (let j = 1; j <= n; j++) {
-    const prev = coordinates[j - 1];
-    const curr = coordinates[j % n];
+    const prev = loopCoordinates[j - 1];
+    const curr = loopCoordinates[j % n];
     const { distanceMeters, bearingDegrees } = geoMeasure(prev, curr);
     const cardinal = bearingToCardinal(bearingDegrees).toUpperCase();
     const distanceFeet = Math.round(distanceMeters * METERS_TO_FEET);
