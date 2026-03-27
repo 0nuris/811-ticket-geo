@@ -1,6 +1,6 @@
 {
   "name": "811-ticket-geo",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Geo utilities and driving directions for 811 ticket workflows",
   "type": "module",
   "main": "./dist/index.cjs",

@@ -401,28 +401,22 @@ function replaceCardinal(text, replacement) {
   }
   return text;
 }
+function coordinatesEqual(a, b) {
+  return a.lat === b.lat && a.lng === b.lng;
+}
+function normalizeLoopCoordinates(coordinates) {
+  if (coordinates.length > 1 && coordinatesEqual(coordinates[0], coordinates[coordinates.length - 1])) {
+    return coordinates.slice(0, -1);
+  }
+  return coordinates;
+}
 function formatDirections(intersection, destination, route, coordinates) {
-  const { county, city, stateCode, zip, name } = intersection;
+  const { city, stateCode, zip, name } = intersection;
   const addressParts = [name];
   if (city) addressParts.push(city);
   if (stateCode && zip) addressParts.push(`${stateCode} ${zip}`);
   else if (stateCode) addressParts.push(stateCode);
   const directionsFrom = addressParts.join(", ");
-  const headerLines = [
-    "*************************",
-    "COUNTY",
-    county,
-    "",
-    "*************************",
-    "CITY",
-    city,
-    "",
-    "*************************",
-    "INTERSECTION:",
-    name,
-    "",
-    "*************************"
-  ];
   const directionsLines = [
     `DIRECTIONS from ${directionsFrom} to ${destination.lat}, ${destination.lng}`,
     ""
@@ -465,19 +459,19 @@ function formatDirections(intersection, destination, route, coordinates) {
   directionsLines.push("");
   directionsLines.push("Important Mark Utilities along and within the polygon boundary.");
   directionsLines.push("Bounding box dimensions are for reference only - use polygon coordinates below.");
-  return headerLines.join("\n") + "\n" + directionsLines.join("\n");
+  return directionsLines.join("\n");
 }
 function formatMarkingText(coordinates) {
-  const n = coordinates.length;
+  const loopCoordinates = normalizeLoopCoordinates(coordinates);
+  const n = loopCoordinates.length;
   const lines = [
-    "*************************",
     `WORK AREA BOUNDARIES (${n} points)`
   ];
-  const start = coordinates[0];
+  const start = loopCoordinates[0];
   lines.push(`Start: ${start.lat}, ${start.lng}`);
   for (let j = 1; j <= n; j++) {
-    const prev = coordinates[j - 1];
-    const curr = coordinates[j % n];
+    const prev = loopCoordinates[j - 1];
+    const curr = loopCoordinates[j % n];
     const { distanceMeters, bearingDegrees } = geoMeasure(prev, curr);
     const cardinal = bearingToCardinal(bearingDegrees).toUpperCase();
     const distanceFeet = Math.round(distanceMeters * METERS_TO_FEET2);
@@ -735,6 +729,23 @@ async function findNearestIntersection(googleApiKey, geonamesUsername, lat, lng,
 }
 
 // src/client.ts
+function coordinatesEqual2(a, b) {
+  return a.lat === b.lat && a.lng === b.lng;
+}
+function rotateCoordinatesToStart(coordinates, start) {
+  if (coordinates.length === 0) return [];
+  const isClosed = coordinates.length > 1 && coordinatesEqual2(coordinates[0], coordinates[coordinates.length - 1]);
+  const openCoordinates = isClosed ? coordinates.slice(0, -1) : coordinates.slice();
+  const startIndex = openCoordinates.findIndex((coord) => coordinatesEqual2(coord, start));
+  if (startIndex <= 0) {
+    return isClosed ? [...openCoordinates, openCoordinates[0]] : openCoordinates;
+  }
+  const rotated = [
+    ...openCoordinates.slice(startIndex),
+    ...openCoordinates.slice(0, startIndex)
+  ];
+  return isClosed ? [...rotated, rotated[0]] : rotated;
+}
 function extractTurnStreets(steps) {
   for (let i = steps.length - 1; i >= 0; i--) {
     const maneuver = steps[i].navigationInstruction?.maneuver ?? "";
@@ -858,8 +869,10 @@ var TicketGeoClient = class {
       }
     }
     if (!bestOriginal) throw new Error("Could not find nearest boundary point");
-    const { bearingDegrees: heading } = geoMeasure(intersection, bestOriginal);
-    const routeResult = await this.computeRoute(intersection, bestOriginal, heading);
+    const orderedCoordinates = rotateCoordinatesToStart(coordinates, bestOriginal);
+    const startCoordinate = orderedCoordinates[0];
+    const { bearingDegrees: heading } = geoMeasure(intersection, startCoordinate);
+    const routeResult = await this.computeRoute(intersection, startCoordinate, heading);
     if (!routeResult) throw new Error("Could not compute route from intersection to site");
     if (!snapStreet) {
       const { onto } = extractTurnStreets(routeResult.steps);
@@ -875,12 +888,12 @@ var TicketGeoClient = class {
         zip: intersection.zip || snapRoadInfo.zip || ""
       };
     }
-    const directionsText = formatDirections(intersection, bestOriginal, routeResult, coordinates);
-    const markingText = formatMarkingText(coordinates);
-    const areaAcres = polygonAreaAcres(coordinates);
-    const boundingBox = boundingBoxFeet(coordinates);
+    const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates);
+    const markingText = formatMarkingText(orderedCoordinates);
+    const areaAcres = polygonAreaAcres(orderedCoordinates);
+    const boundingBox = boundingBoxFeet(orderedCoordinates);
     return {
-      coordinates,
+      coordinates: orderedCoordinates,
       intersection,
       directionsText,
       markingText,
