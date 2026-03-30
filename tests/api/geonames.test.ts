@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { findNearestIntersection } from "../../src/api/geonames.js";
+import { findIntersectionCandidates, findNearestIntersection } from "../../src/api/geonames.js";
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
@@ -97,5 +97,154 @@ describe("findNearestIntersection", () => {
     });
     expect(result).not.toBeNull();
     expect(result!.name).toBe("Main St & Oak Ave");
+  });
+});
+
+describe("findIntersectionCandidates", () => {
+  it("returns mixed verified and unverified candidates instead of dropping unverified ones", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [
+          { street1: "Elm St", street2: "1st Ave", lat: "33.0", lng: "-97.0", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+          { street1: "River Rd", street2: "Oak Ave", lat: "33.001", lng: "-97.001", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+        ],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 33.0, lng: -97.0 } } }],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "ZERO_RESULTS",
+        results: [],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 33.0, -97.0, {
+      maxCandidates: 2,
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0].name).toBe("Elm St & 1st Ave");
+    expect(result[1].name).toBe("River Rd & Oak Ave (unverified)");
+  });
+
+  it("returns candidates sorted with preferred road first when verified", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [
+          { street1: "Elm St", street2: "1st Ave", lat: "33.0", lng: "-97.0", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+          { street1: "Main St", street2: "Oak Ave", lat: "33.001", lng: "-97.001", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+        ],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 33.0, lng: -97.0 } } }],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 33.001, lng: -97.001 } } }],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 33.0, -97.0, {
+      preferredRoad: "Main St",
+      maxCandidates: 2,
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0].name).toBe("Main St & Oak Ave");
+    expect(result[1].name).toBe("Elm St & 1st Ave");
+  });
+
+  it("sorts an unverified preferred-road candidate ahead of verified non-matches", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [
+          { street1: "Elm St", street2: "1st Ave", lat: "33.0", lng: "-97.0", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+          { street1: "Park Avenue", street2: "Oak Ave", lat: "33.001", lng: "-97.001", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+        ],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 33.0, lng: -97.0 } } }],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "ZERO_RESULTS",
+        results: [],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 33.0, -97.0, {
+      preferredRoad: "Park Ave",
+      maxCandidates: 2,
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0].name).toBe("Park Avenue & Oak Ave (unverified)");
+    expect(result[1].name).toBe("Elm St & 1st Ave");
+  });
+
+  it("matches preferred road across abbreviation differences", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [
+          { street1: "Elm St", street2: "1st Ave", lat: "33.0", lng: "-97.0", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+          { street1: "Park Avenue", street2: "Oak Ave", lat: "33.001", lng: "-97.001", adminName2: "", placeName: "", adminName1: "", adminCode1: "", postalcode: "" },
+        ],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 33.0, lng: -97.0 } } }],
+      }),
+    });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 33.001, lng: -97.001 } } }],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 33.0, -97.0, {
+      preferredRoad: "Park Ave",
+      maxCandidates: 2,
+    });
+
+    expect(result).toHaveLength(2);
+    expect(result[0].name).toBe("Park Avenue & Oak Ave");
+    expect(result[1].name).toBe("Elm St & 1st Ave");
   });
 });

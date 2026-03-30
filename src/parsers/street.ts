@@ -11,6 +11,16 @@ const STREET_TYPES = new Set([
 const STREET_TYPE_LOOKUP = new Map<string, string>();
 for (const t of STREET_TYPES) STREET_TYPE_LOOKUP.set(t.toLowerCase(), t);
 
+const FULL_FORMS: Record<string, string> = {
+  avenue: "Ave", boulevard: "Blvd", circle: "Cir", court: "Ct",
+  drive: "Dr", expressway: "Expy", freeway: "Fwy", highway: "Hwy",
+  lane: "Ln", loop: "Loop", parkway: "Pkwy", place: "Pl", road: "Rd",
+  square: "Sq", street: "St", terrace: "Ter", trail: "Trl", way: "Way",
+};
+for (const [full, abbrev] of Object.entries(FULL_FORMS)) {
+  STREET_TYPE_LOOKUP.set(full, abbrev);
+}
+
 const DIRECTIONAL_LOOKUP = new Map<string, string>();
 for (const d of DIRECTIONALS) DIRECTIONAL_LOOKUP.set(d.toLowerCase(), d);
 
@@ -50,4 +60,14 @@ export function parseStreet(streetString: string): StreetParts {
 
   const name = tokens.length > 0 ? tokens.join(" ") : streetString.trim();
   return { name, type: streetType, prefix, suffix };
+}
+
+export function streetsMatch(a: string, b: string): boolean {
+  const pa = parseStreet(a);
+  const pb = parseStreet(b);
+  if (pa.name.toLowerCase() !== pb.name.toLowerCase()) return false;
+  if (pa.type && pb.type && pa.type !== pb.type) return false;
+  if (pa.prefix && pb.prefix && pa.prefix !== pb.prefix) return false;
+  if (pa.suffix && pb.suffix && pa.suffix !== pb.suffix) return false;
+  return true;
 }

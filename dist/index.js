@@ -307,6 +307,29 @@ var STREET_TYPES = /* @__PURE__ */ new Set([
 ]);
 var STREET_TYPE_LOOKUP = /* @__PURE__ */ new Map();
 for (const t of STREET_TYPES) STREET_TYPE_LOOKUP.set(t.toLowerCase(), t);
+var FULL_FORMS = {
+  avenue: "Ave",
+  boulevard: "Blvd",
+  circle: "Cir",
+  court: "Ct",
+  drive: "Dr",
+  expressway: "Expy",
+  freeway: "Fwy",
+  highway: "Hwy",
+  lane: "Ln",
+  loop: "Loop",
+  parkway: "Pkwy",
+  place: "Pl",
+  road: "Rd",
+  square: "Sq",
+  street: "St",
+  terrace: "Ter",
+  trail: "Trl",
+  way: "Way"
+};
+for (const [full, abbrev] of Object.entries(FULL_FORMS)) {
+  STREET_TYPE_LOOKUP.set(full, abbrev);
+}
 var DIRECTIONAL_LOOKUP = /* @__PURE__ */ new Map();
 for (const d of DIRECTIONALS) DIRECTIONAL_LOOKUP.set(d.toLowerCase(), d);
 function parseStreet(streetString) {
@@ -337,6 +360,15 @@ function parseStreet(streetString) {
   }
   const name = tokens.length > 0 ? tokens.join(" ") : streetString.trim();
   return { name, type: streetType, prefix, suffix };
+}
+function streetsMatch(a, b) {
+  const pa = parseStreet(a);
+  const pb = parseStreet(b);
+  if (pa.name.toLowerCase() !== pb.name.toLowerCase()) return false;
+  if (pa.type && pb.type && pa.type !== pb.type) return false;
+  if (pa.prefix && pb.prefix && pa.prefix !== pb.prefix) return false;
+  if (pa.suffix && pb.suffix && pa.suffix !== pb.suffix) return false;
+  return true;
 }
 
 // src/directions/format.ts
@@ -654,7 +686,19 @@ function buildResult(ix, googleInfo) {
     zip: ix.postalcode
   };
 }
-async function findNearestIntersection(googleApiKey, geonamesUsername, lat, lng, options) {
+function sortByPreferredRoad(items, getStreets, preferredRoad) {
+  if (!preferredRoad) return items;
+  const matching = items.filter((item) => {
+    const { street1, street2 } = getStreets(item);
+    return streetsMatch(street1, preferredRoad) || streetsMatch(street2, preferredRoad);
+  });
+  const nonMatching = items.filter((item) => {
+    const { street1, street2 } = getStreets(item);
+    return !streetsMatch(street1, preferredRoad) && !streetsMatch(street2, preferredRoad);
+  });
+  return [...matching, ...nonMatching];
+}
+async function findIntersectionCandidates(googleApiKey, geonamesUsername, lat, lng, options) {
   const { preferredRoad, maxCandidates = 3, radiusKm = 1 } = options ?? {};
   const url = new URL(GEONAMES_INTERSECTION_URL);
   url.searchParams.set("lat", String(lat));
@@ -665,32 +709,30 @@ async function findNearestIntersection(googleApiKey, geonamesUsername, lat, lng,
   let data;
   try {
     const resp = await fetch(url.toString());
-    if (!resp.ok) return null;
+    if (!resp.ok) return [];
     data = await resp.json();
   } catch {
-    return null;
+    return [];
   }
   const raw = data.intersection;
-  if (!raw) return null;
+  if (!raw) return [];
   const candidates = Array.isArray(raw) ? raw : [raw];
-  const verified = [];
+  const results = [];
   for (const ix of candidates) {
     const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2);
-    if (googleInfo) {
-      verified.push({ ix, googleInfo });
-    }
+    results.push(buildResult(ix, googleInfo));
   }
-  if (preferredRoad && verified.length > 0) {
-    for (const { ix, googleInfo } of verified) {
-      if (ix.street1 === preferredRoad || ix.street2 === preferredRoad) {
-        return buildResult(ix, googleInfo);
-      }
-    }
-  }
-  if (verified.length > 0) {
-    return buildResult(verified[0].ix, verified[0].googleInfo);
-  }
-  return buildResult(candidates[0]);
+  return sortByPreferredRoad(results, (ix) => ix, preferredRoad);
+}
+async function findNearestIntersection(googleApiKey, geonamesUsername, lat, lng, options) {
+  const candidates = await findIntersectionCandidates(
+    googleApiKey,
+    geonamesUsername,
+    lat,
+    lng,
+    options
+  );
+  return candidates[0] ?? null;
 }
 
 // src/client.ts
@@ -726,6 +768,19 @@ function extractTurnStreets(steps) {
   }
   return { from: null, onto: null };
 }
+function nearestCoordinateToTarget(coordinates, target) {
+  if (coordinates.length === 0) return null;
+  let bestDistance = Infinity;
+  let bestCoordinate = coordinates[0];
+  for (const coordinate of coordinates) {
+    const { distanceMeters } = geoMeasure(target, coordinate);
+    if (distanceMeters < bestDistance) {
+      bestDistance = distanceMeters;
+      bestCoordinate = coordinate;
+    }
+  }
+  return { coordinate: bestCoordinate, distanceMeters: bestDistance };
+}
 var TicketGeoClient = class {
   googleApiKey;
   geonamesUsername;
@@ -756,6 +811,82 @@ var TicketGeoClient = class {
   async computeRoute(origin, destination, heading) {
     return computeRoute(this.googleApiKey, origin, destination, heading);
   }
+  /**
+   * Selects the intersection with the shortest routed distance among a
+   * single candidate from each populated quadrant around the snapped point.
+   *
+   * Strategy: Query GeoNames for candidate intersections within radiusKm of the
+   * snapped road point, then select the nearest candidate from each cardinal
+   * quadrant (N/E/S/W) relative to the snap point. This ensures geographic
+   * coverage — a linearly closer intersection may have a longer driving route
+   * due to road topology (highway barriers, one-way streets, etc.). Each
+   * selected candidate is routed to its nearest polygon vertex; the shortest
+   * route wins.
+   *
+   * This quadrant-based heuristic intentionally limits routed candidates to
+   * reduce false positives caused by rivers, dead ends, and other topology
+   * quirks. A previous scout-and-requery approach could discover intersections
+   * beyond radiusKm, but was less deterministic and harder to reason about.
+   */
+  async selectShortestRouteIntersection(coordinates, options) {
+    if (coordinates.length === 0) return null;
+    let snappedPoint = options?.snappedPoint;
+    if (!snappedPoint) {
+      const snappedPoints = await this.findNearestRoadPoint(coordinates);
+      let bestSnapDistance = Infinity;
+      for (const snapped of snappedPoints) {
+        const original = coordinates[snapped.originalIndex];
+        const { distanceMeters } = geoMeasure(original, snapped.location);
+        if (distanceMeters < bestSnapDistance) {
+          bestSnapDistance = distanceMeters;
+          snappedPoint = snapped.location;
+        }
+      }
+    }
+    if (!snappedPoint) return null;
+    const preferredRoad = options?.preferredRoad ?? (await this.reverseGeocode(snappedPoint.lat, snappedPoint.lng))?.street;
+    const candidates = await findIntersectionCandidates(
+      this.googleApiKey,
+      this.geonamesUsername,
+      snappedPoint.lat,
+      snappedPoint.lng,
+      {
+        preferredRoad,
+        maxCandidates: options?.maxCandidates,
+        radiusKm: options?.radiusKm
+      }
+    );
+    const quadrants = /* @__PURE__ */ new Map();
+    for (const candidate of candidates) {
+      const nearest = nearestCoordinateToTarget(coordinates, candidate);
+      if (!nearest) continue;
+      const { bearingDegrees } = geoMeasure(snappedPoint, candidate);
+      const quadrant = Math.floor((bearingDegrees + 45) % 360 / 90);
+      const existing = quadrants.get(quadrant);
+      if (!existing || nearest.distanceMeters < existing.nearest.distanceMeters) {
+        quadrants.set(quadrant, { candidate, nearest });
+      }
+    }
+    const toRoute = Array.from(quadrants.values());
+    let bestResult = null;
+    let bestLinearDistance = Infinity;
+    for (const { candidate, nearest } of toRoute) {
+      const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
+      const route = await this.computeRoute(candidate, nearest.coordinate, heading);
+      if (!route) continue;
+      const isBetterRoute = !bestResult || route.distanceMeters < bestResult.route.distanceMeters;
+      const isSameRouteButNearer = !!bestResult && Math.abs(route.distanceMeters - bestResult.route.distanceMeters) < 10 && nearest.distanceMeters < bestLinearDistance;
+      if (isBetterRoute || isSameRouteButNearer) {
+        bestResult = {
+          intersection: candidate,
+          nearestCoordinate: nearest.coordinate,
+          route
+        };
+        bestLinearDistance = nearest.distanceMeters;
+      }
+    }
+    return bestResult;
+  }
   async processSite(coordinates, options) {
     const intersectionOverride = options?.intersectionOverride;
     const snappedPoints = await this.findNearestRoadPoint(coordinates);
@@ -777,68 +908,35 @@ var TicketGeoClient = class {
     const snapRoadInfo = await this.reverseGeocode(bestSnapped.lat, bestSnapped.lng);
     let snapStreet = snapRoadInfo?.street ?? null;
     let intersection = null;
+    let startCoordinate = null;
+    let routeResult = null;
     if (intersectionOverride) {
       intersection = await this.geocodeIntersection(intersectionOverride);
-    }
-    if (!intersection) {
-      const scoutIntersection = await this.findNearestIntersection(
-        bestSnapped.lat,
-        bestSnapped.lng,
-        { preferredRoad: snapStreet ?? void 0 }
-      );
-      if (!scoutIntersection) throw new Error("No intersection found near snapped road point");
-      const { bearingDegrees: scoutHeading } = geoMeasure(scoutIntersection, bestOriginal);
-      const scoutResult = await this.computeRoute(scoutIntersection, bestOriginal, scoutHeading);
-      if (!scoutResult) throw new Error("Could not compute scout route");
-      const scoutDistance = scoutResult.distanceMeters;
-      let lastTurn = null;
-      for (let i = scoutResult.steps.length - 1; i >= 0; i--) {
-        const maneuver = scoutResult.steps[i].navigationInstruction?.maneuver ?? "";
-        if (maneuver === "TURN_LEFT" || maneuver === "TURN_RIGHT") {
-          const loc = scoutResult.steps[i].startLocation?.latLng;
-          if (loc) {
-            lastTurn = { lat: loc.latitude, lng: loc.longitude };
-          }
-          break;
-        }
-      }
-      if (lastTurn) {
-        const turnIntersection = await this.findNearestIntersection(
-          lastTurn.lat,
-          lastTurn.lng,
-          { preferredRoad: snapStreet ?? void 0 }
+      if (!intersection) {
+        throw new Error(
+          `Intersection override "${intersectionOverride}" could not be geocoded`
         );
-        if (turnIntersection) {
-          const { bearingDegrees: turnHeading } = geoMeasure(turnIntersection, bestOriginal);
-          const turnResult = await this.computeRoute(turnIntersection, bestOriginal, turnHeading);
-          if (turnResult && turnResult.distanceMeters < scoutDistance) {
-            intersection = turnIntersection;
-          } else {
-            intersection = scoutIntersection;
-          }
-        } else {
-          intersection = scoutIntersection;
-        }
-      } else {
-        intersection = scoutIntersection;
       }
     }
-    if (!intersection) throw new Error("Failed to determine intersection");
-    bestDist = Infinity;
-    bestOriginal = null;
-    for (const coord of coordinates) {
-      const { distanceMeters } = geoMeasure(intersection, coord);
-      if (distanceMeters < bestDist) {
-        bestDist = distanceMeters;
-        bestOriginal = coord;
-      }
+    if (intersection) {
+      const nearest = nearestCoordinateToTarget(coordinates, intersection);
+      if (!nearest) throw new Error("No coordinates provided");
+      startCoordinate = nearest.coordinate;
+      const { bearingDegrees: heading } = geoMeasure(intersection, startCoordinate);
+      routeResult = await this.computeRoute(intersection, startCoordinate, heading);
+      if (!routeResult) throw new Error("Could not compute route from intersection to site");
+    } else {
+      const selected = await this.selectShortestRouteIntersection(coordinates, {
+        snappedPoint: bestSnapped,
+        preferredRoad: snapStreet ?? void 0
+      });
+      if (!selected) throw new Error("No intersection found near snapped road point");
+      intersection = selected.intersection;
+      startCoordinate = selected.nearestCoordinate;
+      routeResult = selected.route;
     }
-    if (!bestOriginal) throw new Error("Could not find nearest boundary point");
-    const orderedCoordinates = rotateCoordinatesToStart(coordinates, bestOriginal);
-    const startCoordinate = orderedCoordinates[0];
-    const { bearingDegrees: heading } = geoMeasure(intersection, startCoordinate);
-    const routeResult = await this.computeRoute(intersection, startCoordinate, heading);
-    if (!routeResult) throw new Error("Could not compute route from intersection to site");
+    const orderedCoordinates = rotateCoordinatesToStart(coordinates, startCoordinate);
+    startCoordinate = orderedCoordinates[0];
     if (!snapStreet) {
       const { onto } = extractTurnStreets(routeResult.steps);
       if (onto) snapStreet = onto;
@@ -877,6 +975,7 @@ export {
   parseStreet,
   polygonAreaAcres,
   simplifyPolygon,
+  streetsMatch,
   toPolygonWkt
 };
 //# sourceMappingURL=index.js.map

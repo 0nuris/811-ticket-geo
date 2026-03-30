@@ -95,3 +95,13 @@ export interface FindIntersectionOptions {
   maxCandidates?: number;
   radiusKm?: number;
 }
+
+export interface SelectIntersectionOptions extends FindIntersectionOptions {
+  snappedPoint?: Coordinate;
+}
+
+export interface IntersectionSelectionResult {
+  intersection: Intersection;
+  nearestCoordinate: Coordinate;
+  route: RouteResult;
+}

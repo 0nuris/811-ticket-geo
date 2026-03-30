@@ -1,5 +1,6 @@
 import type { FindIntersectionOptions, Intersection } from "../types.js";
 import { googleValidates } from "./google.js";
+import { streetsMatch } from "../parsers/street.js";
 
 const GEONAMES_INTERSECTION_URL = "https://secure.geonames.org/findNearestIntersectionJSON";
 
@@ -59,13 +60,31 @@ function buildResult(ix: GeoNamesCandidate, googleInfo?: GoogleInfo | null): Int
   };
 }
 
-export async function findNearestIntersection(
+function sortByPreferredRoad<T>(
+  items: T[],
+  getStreets: (item: T) => { street1: string; street2: string },
+  preferredRoad?: string
+): T[] {
+  if (!preferredRoad) return items;
+
+  const matching = items.filter((item) => {
+    const { street1, street2 } = getStreets(item);
+    return streetsMatch(street1, preferredRoad) || streetsMatch(street2, preferredRoad);
+  });
+  const nonMatching = items.filter((item) => {
+    const { street1, street2 } = getStreets(item);
+    return !streetsMatch(street1, preferredRoad) && !streetsMatch(street2, preferredRoad);
+  });
+  return [...matching, ...nonMatching];
+}
+
+export async function findIntersectionCandidates(
   googleApiKey: string,
   geonamesUsername: string,
   lat: number,
   lng: number,
   options?: FindIntersectionOptions
-): Promise<Intersection | null> {
+): Promise<Intersection[]> {
   const { preferredRoad, maxCandidates = 3, radiusKm = 1.0 } = options ?? {};
 
   const url = new URL(GEONAMES_INTERSECTION_URL);
@@ -78,40 +97,39 @@ export async function findNearestIntersection(
   let data: { intersection?: GeoNamesCandidate | GeoNamesCandidate[] };
   try {
     const resp = await fetch(url.toString());
-    if (!resp.ok) return null;
+    if (!resp.ok) return [];
     data = (await resp.json()) as { intersection?: GeoNamesCandidate | GeoNamesCandidate[] };
   } catch {
-    return null;
+    return [];
   }
 
   const raw = data.intersection;
-  if (!raw) return null;
+  if (!raw) return [];
 
   const candidates: GeoNamesCandidate[] = Array.isArray(raw) ? raw : [raw];
 
-  // Validate all candidates with Google
-  const verified: Array<{ ix: GeoNamesCandidate; googleInfo: GoogleInfo }> = [];
+  const results: Intersection[] = [];
   for (const ix of candidates) {
     const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2);
-    if (googleInfo) {
-      verified.push({ ix, googleInfo });
-    }
+    results.push(buildResult(ix, googleInfo));
   }
 
-  // First pass: verified candidate that includes the preferred road
-  if (preferredRoad && verified.length > 0) {
-    for (const { ix, googleInfo } of verified) {
-      if (ix.street1 === preferredRoad || ix.street2 === preferredRoad) {
-        return buildResult(ix, googleInfo);
-      }
-    }
-  }
+  return sortByPreferredRoad(results, (ix) => ix, preferredRoad);
+}
 
-  // Second pass: any verified candidate
-  if (verified.length > 0) {
-    return buildResult(verified[0].ix, verified[0].googleInfo);
-  }
-
-  // Fallback: nearest unverified
-  return buildResult(candidates[0]);
+export async function findNearestIntersection(
+  googleApiKey: string,
+  geonamesUsername: string,
+  lat: number,
+  lng: number,
+  options?: FindIntersectionOptions
+): Promise<Intersection | null> {
+  const candidates = await findIntersectionCandidates(
+    googleApiKey,
+    geonamesUsername,
+    lat,
+    lng,
+    options
+  );
+  return candidates[0] ?? null;
 }
