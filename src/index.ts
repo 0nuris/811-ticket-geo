@@ -22,5 +22,6 @@ export { polygonAreaAcres, boundingBoxFeet } from "./geo/area.js";
 export { toPolygonWkt } from "./geo/wkt.js";
 export { simplifyPolygon } from "./geo/simplify.js";
 export { parseStreet, streetsMatch } from "./parsers/street.js";
-export { formatDirections, formatMarkingText } from "./directions/format.js";
+export { formatDirections, formatMarkingText, formatManualDirections } from "./directions/format.js";
+export type { ManualDirectionsArgs } from "./directions/format.js";
 export { TicketGeoClient } from "./client.js";

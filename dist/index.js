@@ -407,17 +407,17 @@ function normalizeLoopCoordinates(coordinates) {
   }
   return coordinates;
 }
-function formatDirections(intersection, destination, route, coordinates) {
+function buildDirectionsHeader(intersection, destination) {
   const { city, stateCode, zip, name } = intersection;
   const addressParts = [name];
   if (city) addressParts.push(city);
   if (stateCode && zip) addressParts.push(`${stateCode} ${zip}`);
   else if (stateCode) addressParts.push(stateCode);
   const directionsFrom = addressParts.join(", ");
-  const directionsLines = [
-    `DIRECTIONS from ${directionsFrom} to ${destination.lat}, ${destination.lng}`,
-    ""
-  ];
+  return `DIRECTIONS from ${directionsFrom} to ${destination.lat}, ${destination.lng}`;
+}
+function renderRouteSteps(route, destination) {
+  const lines = [];
   const steps = route.steps;
   const stepLocations = steps.map((step) => {
     const loc = step.startLocation?.latLng;
@@ -428,35 +428,102 @@ function formatDirections(intersection, destination, route, coordinates) {
     const nav = step.navigationInstruction ?? {};
     let instruction = (nav.instructions ?? "Continue").replace(/\n/g, " - ");
     const currentLocation = stepLocations[i];
-    const nextLocation = i + 1 < stepLocations.length ? stepLocations[i + 1] : destination;
-    const canCompute = currentLocation !== null && nextLocation !== null;
+    const nextStepLocation = i + 1 < stepLocations.length ? stepLocations[i + 1] : null;
     const hasUturn = instruction.toLowerCase().includes("u-turn");
-    if (canCompute && currentLocation && nextLocation) {
-      const { bearingDegrees } = geoMeasure(currentLocation, nextLocation);
-      const cardinal = bearingToCardinal(bearingDegrees);
-      if (i === 0 && !hasUturn && hasCardinal(instruction)) {
-        instruction = replaceCardinal(instruction, cardinal);
-      } else if (!hasCardinal(instruction)) {
-        instruction = `${instruction} heading ${cardinal}`;
+    if (i === 0 && !hasUturn && hasCardinal(instruction) && currentLocation && nextStepLocation) {
+      const { bearingDegrees } = geoMeasure(currentLocation, nextStepLocation);
+      instruction = replaceCardinal(instruction, bearingToCardinal(bearingDegrees));
+    } else if (!hasCardinal(instruction)) {
+      const headingTarget = nextStepLocation ?? destination;
+      if (currentLocation && headingTarget) {
+        const { bearingDegrees } = geoMeasure(currentLocation, headingTarget);
+        instruction = `${instruction} heading ${bearingToCardinal(bearingDegrees)}`;
       }
     }
     const locVals = step.localizedValues ?? {};
     const dist = locVals.distance?.text ?? "";
     const dur = locVals.duration?.text ?? "";
     const suffix = [dist, dur].filter(Boolean).join(", ");
-    directionsLines.push(`${i + 1}. ${instruction} (${suffix})`);
+    lines.push(`${i + 1}. ${instruction} (${suffix})`);
   }
+  return lines;
+}
+function formatStepDistance(meters) {
+  const feet = meters * METERS_TO_FEET2;
+  return feet >= 1e3 ? `${(feet / 5280).toFixed(1)} mi` : `${Math.round(feet)} ft`;
+}
+function roundCoordinate(value) {
+  return Math.round(value * 1e6) / 1e6;
+}
+var ONSITE_STEP_TURN_DEGREES = 45;
+function angularDifference(a, b) {
+  const diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+function groupRouteSteps(path, turnThreshold) {
+  const groups = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const a = path[i];
+    const b = path[i + 1];
+    const { distanceMeters, bearingDegrees } = geoMeasure(a, b);
+    const current = groups[groups.length - 1];
+    if (current && angularDifference(bearingDegrees, current.anchorBearing) <= turnThreshold) {
+      current.meters += distanceMeters;
+      current.end = b;
+    } else {
+      groups.push({ start: a, end: b, meters: distanceMeters, anchorBearing: bearingDegrees });
+    }
+  }
+  return groups;
+}
+function renderAreaTrailer(coordinates) {
   const area = polygonAreaAcres(coordinates);
   const bbox = boundingBoxFeet(coordinates);
-  directionsLines.push("");
-  directionsLines.push(`Area: ${area.toFixed(1)} acres`);
-  directionsLines.push(
-    `Bounding Box: ${Math.round(bbox.northSouthFeet)} feet (North-South) by ${Math.round(bbox.eastWestFeet)} feet (East-West)`
-  );
-  directionsLines.push("");
-  directionsLines.push("Important Mark Utilities along and within the polygon boundary.");
-  directionsLines.push("Bounding box dimensions are for reference only - use polygon coordinates below.");
+  return [
+    "",
+    `Area: ${area.toFixed(1)} acres`,
+    `Bounding Box: ${Math.round(bbox.northSouthFeet)} feet (North-South) by ${Math.round(bbox.eastWestFeet)} feet (East-West)`,
+    "",
+    "Important Mark Utilities along and within the polygon boundary.",
+    "Bounding box dimensions are for reference only - use polygon coordinates below."
+  ];
+}
+function formatDirections(intersection, destination, route, coordinates, finalApproach) {
+  const directionsLines = [buildDirectionsHeader(intersection, destination), ""];
+  directionsLines.push(...renderRouteSteps(route, destination));
+  if (finalApproach && finalApproach.distanceFeet > 0) {
+    const off = finalApproach.roadName ? ` off ${finalApproach.roadName}` : " off the roadway";
+    directionsLines.push(
+      `${route.steps.length + 1}. Work area is about ${finalApproach.distanceFeet} ft ${finalApproach.cardinal}${off} - leave the road and enter the site (off-road).`
+    );
+  }
+  directionsLines.push(...renderAreaTrailer(coordinates));
   return directionsLines.join("\n");
+}
+function formatManualDirections({
+  intersection,
+  autoLeg,
+  entrance,
+  waypoints,
+  polygon
+}) {
+  const lines = [buildDirectionsHeader(intersection, entrance), ""];
+  lines.push(...renderRouteSteps(autoLeg, entrance));
+  lines.push("");
+  lines.push("Entrance/gate reached - proceed on-site to the work area:");
+  const onSiteStart = autoLeg.steps.length;
+  const groups = groupRouteSteps([entrance, ...waypoints], ONSITE_STEP_TURN_DEGREES);
+  groups.forEach((group, i) => {
+    const direction = bearingToCardinal(geoMeasure(group.start, group.end).bearingDegrees);
+    const distance = formatStepDistance(group.meters);
+    const lat = roundCoordinate(group.end.lat);
+    const lng = roundCoordinate(group.end.lng);
+    const isLast = i === groups.length - 1;
+    const target = isLast ? `the work area at ${lat}, ${lng}` : `${lat}, ${lng}`;
+    lines.push(`${onSiteStart + i + 1}. Head ${direction} (${distance}) to ${target}`);
+  });
+  lines.push(...renderAreaTrailer(polygon));
+  return lines.join("\n");
 }
 function formatMarkingText(coordinates) {
   const loopCoordinates = normalizeLoopCoordinates(coordinates);
@@ -476,6 +543,34 @@ function formatMarkingText(coordinates) {
   }
   lines.push(`Returns to start point (${start.lat}, ${start.lng})`);
   return lines.join("\n");
+}
+
+// src/parsers/normalize.ts
+var REPLACEMENTS = [
+  [/\bCo\.?\s+Rd\b/gi, "County Road"],
+  [/\bCnty\.?\s+Rd\b/gi, "County Road"],
+  [/\bUS\s+Hwy\b/gi, "US Highway"],
+  [/\b(?:State|St)\s+Hwy\b/gi, "State Highway"],
+  [/\bRanch\s+Rd\b/gi, "Ranch Road"],
+  [/\bFM\b/gi, "Farm to Market"],
+  [/\bRM\b/gi, "Ranch to Market"],
+  [/\bHwy\b/gi, "Highway"],
+  // Standalone directionals (compounds first).
+  [/\bNE\b/g, "Northeast"],
+  [/\bNW\b/g, "Northwest"],
+  [/\bSE\b/g, "Southeast"],
+  [/\bSW\b/g, "Southwest"],
+  [/\bN\b/g, "North"],
+  [/\bS\b/g, "South"],
+  [/\bE\b/g, "East"],
+  [/\bW\b/g, "West"]
+];
+function normalizeRoadName(name) {
+  let out = (name || "").trim().replace(/\s+/g, " ");
+  for (const [pattern, replacement] of REPLACEMENTS) {
+    out = out.replace(pattern, replacement);
+  }
+  return out.replace(/\s+/g, " ").trim();
 }
 
 // src/api/google.ts
@@ -558,12 +653,24 @@ async function reverseGeocode(apiKey, lat, lng) {
   }
   return null;
 }
-async function googleValidates(apiKey, street1, street2) {
-  const results = await geocodeRequest(apiKey, { address: `${street1} and ${street2}` });
+async function googleValidates(apiKey, street1, street2, context) {
+  const s1 = normalizeRoadName(street1);
+  const s2 = normalizeRoadName(street2);
+  const parts = [context?.city, context?.stateCode].filter(Boolean);
+  const suffix = parts.length ? `, ${parts.join(", ")}` : "";
+  const results = await geocodeRequest(apiKey, { address: `${s1} and ${s2}${suffix}` });
   for (const result of results) {
     const types = result.types ?? [];
     if (types.includes("intersection")) {
-      return parseAddressComponents(result);
+      const info = parseAddressComponents(result);
+      const head = String(result.formatted_address ?? "").split(",")[0].trim();
+      const streets = head.split(/\s*&\s*/);
+      if (streets.length === 2 && streets[0] && streets[1]) {
+        info.intersectionStreet1 = streets[0];
+        info.intersectionStreet2 = streets[1];
+        info.intersectionName = `${streets[0]} & ${streets[1]}`;
+      }
+      return info;
     }
   }
   return null;
@@ -655,15 +762,19 @@ async function computeRoute(apiKey, origin, destination, heading) {
 
 // src/api/geonames.ts
 var GEONAMES_INTERSECTION_URL = "https://secure.geonames.org/findNearestIntersectionJSON";
+var MAX_VALIDATION_DISTANCE_METERS = 750;
 function buildResult(ix, googleInfo) {
   const name = `${ix.street1} & ${ix.street2}`;
   const ixLat = parseFloat(ix.lat);
   const ixLng = parseFloat(ix.lng);
+  if (googleInfo && googleInfo.lat !== void 0 && googleInfo.lng !== void 0 && geoMeasure({ lat: ixLat, lng: ixLng }, { lat: googleInfo.lat, lng: googleInfo.lng }).distanceMeters > MAX_VALIDATION_DISTANCE_METERS) {
+    googleInfo = null;
+  }
   if (googleInfo) {
     return {
-      name,
-      street1: ix.street1,
-      street2: ix.street2,
+      name: googleInfo.intersectionName || name,
+      street1: googleInfo.intersectionStreet1 || ix.street1,
+      street2: googleInfo.intersectionStreet2 || ix.street2,
       lat: googleInfo.lat ?? ixLat,
       lng: googleInfo.lng ?? ixLng,
       county: googleInfo.county ?? ix.adminName2,
@@ -719,7 +830,10 @@ async function findIntersectionCandidates(googleApiKey, geonamesUsername, lat, l
   const candidates = Array.isArray(raw) ? raw : [raw];
   const results = [];
   for (const ix of candidates) {
-    const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2);
+    const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2, {
+      city: ix.placeName,
+      stateCode: ix.adminCode1
+    });
     results.push(buildResult(ix, googleInfo));
   }
   return sortByPreferredRoad(results, (ix) => ix, preferredRoad);
@@ -780,6 +894,16 @@ function nearestCoordinateToTarget(coordinates, target) {
     }
   }
   return { coordinate: bestCoordinate, distanceMeters: bestDistance };
+}
+function polygonCentroid(coordinates) {
+  const count = coordinates.length;
+  let lat = 0;
+  let lng = 0;
+  for (const coordinate of coordinates) {
+    lat += coordinate.lat;
+    lng += coordinate.lng;
+  }
+  return { lat: lat / count, lng: lng / count };
 }
 var TicketGeoClient = class {
   googleApiKey;
@@ -889,7 +1013,15 @@ var TicketGeoClient = class {
   }
   async processSite(coordinates, options) {
     const intersectionOverride = options?.intersectionOverride;
-    const snappedPoints = await this.findNearestRoadPoint(coordinates);
+    let snappedPoints;
+    try {
+      snappedPoints = await this.findNearestRoadPoint(coordinates);
+    } catch (err) {
+      console.warn(
+        `findNearestRoadPoint failed; falling back to reverse-geocode: ${err instanceof Error ? err.message : String(err)}`
+      );
+      snappedPoints = [];
+    }
     let bestDist = Infinity;
     let bestOriginal = null;
     let bestSnapped = null;
@@ -902,10 +1034,26 @@ var TicketGeoClient = class {
         bestSnapped = sp.location;
       }
     }
+    let snapRoadInfo = null;
+    if (!bestSnapped) {
+      if (coordinates.length === 0) {
+        throw new Error("Could not match any snapped point to original coordinates");
+      }
+      const centroid = polygonCentroid(coordinates);
+      snapRoadInfo = await this.reverseGeocode(centroid.lat, centroid.lng);
+      if (!snapRoadInfo) {
+        throw new Error("Work area is not near any locatable road; provide a nearby intersection manually");
+      }
+      bestSnapped = { lat: snapRoadInfo.lat, lng: snapRoadInfo.lng };
+      const nearest = nearestCoordinateToTarget(coordinates, bestSnapped);
+      bestOriginal = nearest ? nearest.coordinate : coordinates[0];
+    }
     if (!bestOriginal || !bestSnapped) {
       throw new Error("Could not match any snapped point to original coordinates");
     }
-    const snapRoadInfo = await this.reverseGeocode(bestSnapped.lat, bestSnapped.lng);
+    if (!snapRoadInfo) {
+      snapRoadInfo = await this.reverseGeocode(bestSnapped.lat, bestSnapped.lng);
+    }
     let snapStreet = snapRoadInfo?.street ?? null;
     let intersection = null;
     let startCoordinate = null;
@@ -930,7 +1078,7 @@ var TicketGeoClient = class {
         snappedPoint: bestSnapped,
         preferredRoad: snapStreet ?? void 0
       });
-      if (!selected) throw new Error("No intersection found near snapped road point");
+      if (!selected) throw new Error("No nearby intersection could be determined automatically; provide a nearby intersection manually");
       intersection = selected.intersection;
       startCoordinate = selected.nearestCoordinate;
       routeResult = selected.route;
@@ -951,7 +1099,22 @@ var TicketGeoClient = class {
         zip: intersection.zip || snapRoadInfo.zip || ""
       };
     }
-    const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates);
+    let finalApproach;
+    const arrivalRoad = await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
+    if (arrivalRoad) {
+      const { distanceMeters, bearingDegrees } = geoMeasure(
+        { lat: arrivalRoad.lat, lng: arrivalRoad.lng },
+        startCoordinate
+      );
+      if (distanceMeters > 30) {
+        finalApproach = {
+          distanceFeet: Math.round(distanceMeters * 3.28084),
+          cardinal: bearingToCardinal(bearingDegrees),
+          roadName: arrivalRoad.street
+        };
+      }
+    }
+    const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates, finalApproach);
     const markingText = formatMarkingText(orderedCoordinates);
     const areaAcres = polygonAreaAcres(orderedCoordinates);
     const boundingBox = boundingBoxFeet(orderedCoordinates);
@@ -970,6 +1133,7 @@ export {
   bearingToCardinal,
   boundingBoxFeet,
   formatDirections,
+  formatManualDirections,
   formatMarkingText,
   geoMeasure,
   parseStreet,

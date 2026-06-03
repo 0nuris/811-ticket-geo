@@ -21,7 +21,7 @@ import {
   findNearestIntersection as apiFindNearestIntersection,
   findIntersectionCandidates as apiFindIntersectionCandidates,
 } from "./api/geonames.js";
-import { geoMeasure } from "./geo/measure.js";
+import { geoMeasure, bearingToCardinal } from "./geo/measure.js";
 import { formatDirections, formatMarkingText } from "./directions/format.js";
 import { polygonAreaAcres, boundingBoxFeet } from "./geo/area.js";
 
@@ -89,6 +89,17 @@ function nearestCoordinateToTarget(
   }
 
   return { coordinate: bestCoordinate, distanceMeters: bestDistance };
+}
+
+function polygonCentroid(coordinates: Coordinate[]): Coordinate {
+  const count = coordinates.length;
+  let lat = 0;
+  let lng = 0;
+  for (const coordinate of coordinates) {
+    lat += coordinate.lat;
+    lng += coordinate.lng;
+  }
+  return { lat: lat / count, lng: lng / count };
 }
 
 export class TicketGeoClient {
@@ -244,8 +255,22 @@ export class TicketGeoClient {
   ): Promise<SiteResult> {
     const intersectionOverride = options?.intersectionOverride;
 
-    // Step 1: Snap to nearest road
-    const snappedPoints = await this.findNearestRoadPoint(coordinates);
+    // Step 1: Snap to nearest road (best-effort). The Roads API only snaps
+    // points within a tight tolerance of a mapped road, so a work area on raw
+    // land / new construction can return nothing. That must not be fatal.
+    let snappedPoints: SnappedPoint[];
+    try {
+      snappedPoints = await this.findNearestRoadPoint(coordinates);
+    } catch (err) {
+      // Empty snap is expected for far-from-road sites; a 403/network error also
+      // lands here. Log so a key/config problem isn't silently masked by the fallback.
+      console.warn(
+        `findNearestRoadPoint failed; falling back to reverse-geocode: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+      snappedPoints = [];
+    }
 
     // Find closest snapped point to original coordinates
     let bestDist = Infinity;
@@ -262,12 +287,34 @@ export class TicketGeoClient {
       }
     }
 
+    // Fallback when snapping found nothing: reverse-geocode the polygon centroid.
+    // Google reverse geocoding has a far wider range than Roads snapping and
+    // returns the matched road feature's own location, so it pulls a far-from-road
+    // work area onto the nearest road. The intersection search then runs from that
+    // on-road point — exactly where a successful snap would have centered it.
+    let snapRoadInfo: ReverseGeocodeResult | null = null;
+    if (!bestSnapped) {
+      if (coordinates.length === 0) {
+        throw new Error("Could not match any snapped point to original coordinates");
+      }
+      const centroid = polygonCentroid(coordinates);
+      snapRoadInfo = await this.reverseGeocode(centroid.lat, centroid.lng);
+      if (!snapRoadInfo) {
+        throw new Error("Work area is not near any locatable road; provide a nearby intersection manually");
+      }
+      bestSnapped = { lat: snapRoadInfo.lat, lng: snapRoadInfo.lng };
+      const nearest = nearestCoordinateToTarget(coordinates, bestSnapped);
+      bestOriginal = nearest ? nearest.coordinate : coordinates[0];
+    }
+
     if (!bestOriginal || !bestSnapped) {
       throw new Error("Could not match any snapped point to original coordinates");
     }
 
-    // Step 2: Identify road at snap point
-    const snapRoadInfo = await this.reverseGeocode(bestSnapped.lat, bestSnapped.lng);
+    // Step 2: Identify road at snap point (reuse the fallback reverse-geocode).
+    if (!snapRoadInfo) {
+      snapRoadInfo = await this.reverseGeocode(bestSnapped.lat, bestSnapped.lng);
+    }
     let snapStreet = snapRoadInfo?.street ?? null;
 
     // Step 3: Find intersection
@@ -296,7 +343,7 @@ export class TicketGeoClient {
         snappedPoint: bestSnapped,
         preferredRoad: snapStreet ?? undefined,
       });
-      if (!selected) throw new Error("No intersection found near snapped road point");
+      if (!selected) throw new Error("No nearby intersection could be determined automatically; provide a nearby intersection manually");
 
       intersection = selected.intersection;
       startCoordinate = selected.nearestCoordinate;
@@ -325,8 +372,27 @@ export class TicketGeoClient {
       };
     }
 
+    // Compute the off-road final approach: how far the arrival boundary point
+    // sits from the nearest road. A driving route ends at the road, so this is
+    // the only place the "leave the road and enter the site" leg is captured.
+    let finalApproach: { distanceFeet: number; cardinal: string; roadName?: string } | undefined;
+    const arrivalRoad = await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
+    if (arrivalRoad) {
+      const { distanceMeters, bearingDegrees } = geoMeasure(
+        { lat: arrivalRoad.lat, lng: arrivalRoad.lng },
+        startCoordinate
+      );
+      if (distanceMeters > 30) {
+        finalApproach = {
+          distanceFeet: Math.round(distanceMeters * 3.28084),
+          cardinal: bearingToCardinal(bearingDegrees),
+          roadName: arrivalRoad.street,
+        };
+      }
+    }
+
     // Step 6: Format output
-    const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates);
+    const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates, finalApproach);
     const markingText = formatMarkingText(orderedCoordinates);
     const areaAcres = polygonAreaAcres(orderedCoordinates);
     const boundingBox = boundingBoxFeet(orderedCoordinates);

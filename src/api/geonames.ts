@@ -1,8 +1,14 @@
 import type { FindIntersectionOptions, Intersection } from "../types.js";
 import { googleValidates } from "./google.js";
 import { streetsMatch } from "../parsers/street.js";
+import { geoMeasure } from "../geo/measure.js";
 
 const GEONAMES_INTERSECTION_URL = "https://secure.geonames.org/findNearestIntersectionJSON";
+
+// A validated location farther than this from the GeoNames node is treated as a
+// mismatch (e.g. from an over-eager name normalization) and left unverified,
+// rather than relocating the intersection to the wrong place.
+const MAX_VALIDATION_DISTANCE_METERS = 750;
 
 interface GeoNamesCandidate {
   street1: string;
@@ -24,6 +30,9 @@ interface GoogleInfo {
   state?: string;
   stateCode?: string;
   zip?: string;
+  intersectionName?: string;
+  intersectionStreet1?: string;
+  intersectionStreet2?: string;
 }
 
 function buildResult(ix: GeoNamesCandidate, googleInfo?: GoogleInfo | null): Intersection {
@@ -31,11 +40,25 @@ function buildResult(ix: GeoNamesCandidate, googleInfo?: GoogleInfo | null): Int
   const ixLat = parseFloat(ix.lat);
   const ixLng = parseFloat(ix.lng);
 
+  // Reject a validated location that sits far from the GeoNames node so a
+  // mis-normalized name can't silently relocate the intersection.
+  if (
+    googleInfo &&
+    googleInfo.lat !== undefined &&
+    googleInfo.lng !== undefined &&
+    geoMeasure({ lat: ixLat, lng: ixLng }, { lat: googleInfo.lat, lng: googleInfo.lng })
+      .distanceMeters > MAX_VALIDATION_DISTANCE_METERS
+  ) {
+    googleInfo = null;
+  }
+
   if (googleInfo) {
+    // Prefer Google's canonical cross-street names (they carry directionals like
+    // "W Dove Rd" that the GeoNames/TIGER names often drop); fall back to GeoNames.
     return {
-      name,
-      street1: ix.street1,
-      street2: ix.street2,
+      name: googleInfo.intersectionName || name,
+      street1: googleInfo.intersectionStreet1 || ix.street1,
+      street2: googleInfo.intersectionStreet2 || ix.street2,
       lat: googleInfo.lat ?? ixLat,
       lng: googleInfo.lng ?? ixLng,
       county: googleInfo.county ?? ix.adminName2,
@@ -110,7 +133,10 @@ export async function findIntersectionCandidates(
 
   const results: Intersection[] = [];
   for (const ix of candidates) {
-    const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2);
+    const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2, {
+      city: ix.placeName,
+      stateCode: ix.adminCode1,
+    });
     results.push(buildResult(ix, googleInfo));
   }
 

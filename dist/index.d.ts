@@ -116,7 +116,35 @@ declare function simplifyPolygon(points: Coordinate[], maxPoints?: number): Coor
 declare function parseStreet(streetString: string): StreetParts;
 declare function streetsMatch(a: string, b: string): boolean;
 
-declare function formatDirections(intersection: Intersection, destination: Coordinate, route: RouteResult, coordinates: Coordinate[]): string;
+interface FinalApproach {
+    distanceFeet: number;
+    cardinal: string;
+    roadName?: string;
+}
+declare function formatDirections(intersection: Intersection, destination: Coordinate, route: RouteResult, coordinates: Coordinate[], finalApproach?: FinalApproach): string;
+interface ManualDirectionsArgs {
+    /** Validated entrance intersection (the route origin). */
+    intersection: Intersection;
+    /** Auto-computed route from the intersection to the entrance/gate. */
+    autoLeg: RouteResult;
+    /** The entrance/gate coordinate the auto leg ends at. */
+    entrance: Coordinate;
+    /**
+     * Ordered, hand-mapped waypoints from the entrance/gate to the work area.
+     * The last waypoint is the chosen polygon vertex (authoritative destination).
+     */
+    waypoints: Coordinate[];
+    /** Full work-area polygon, used for the area/bounding-box trailer. */
+    polygon: Coordinate[];
+}
+/**
+ * Assembles the combined manual directions for a restricted-access site:
+ * the auto intersection->gate leg (numbered, Google turn-by-turn) followed by
+ * the hand-mapped gate->polygon leg (per-step cardinal + distance, in the
+ * formatMarkingText style). Pure: identical inputs always yield identical text,
+ * so a dry-run preview matches the submitted ticket byte-for-byte.
+ */
+declare function formatManualDirections({ intersection, autoLeg, entrance, waypoints, polygon, }: ManualDirectionsArgs): string;
 declare function formatMarkingText(coordinates: Coordinate[]): string;
 
 declare class TicketGeoClient {
@@ -149,4 +177,4 @@ declare class TicketGeoClient {
     processSite(coordinates: Coordinate[], options?: ProcessSiteOptions): Promise<SiteResult>;
 }
 
-export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSelectionResult, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatMarkingText, geoMeasure, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };
+export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSelectionResult, type ManualDirectionsArgs, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };

@@ -642,4 +642,118 @@ describe("TicketGeoClient.processSite", () => {
     expect(result.intersection.name).toBe("Main St & Oak Ave");
     expect(result.coordinates[0]).toEqual({ lat: 33.001, lng: -96.999 });
   });
+
+  // Far-from-road work areas (new construction / raw land) make the Roads API
+  // return no snapped points. That must not be fatal: reverse-geocode the
+  // centroid onto the nearest road and search the intersection from there.
+  const onRoadAnchor = {
+    street: "Ranch Rd 12",
+    city: "Dripping Springs",
+    county: "Hays",
+    state: "Texas",
+    stateCode: "TX",
+    zip: "78620",
+    lat: 30.189,
+    lng: -98.087,
+  };
+
+  it("falls back to the reverse-geocoded centroid when Roads snapping returns no points", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([]);
+    const reverseGeocode = vi.spyOn(client, "reverseGeocode").mockResolvedValue(onRoadAnchor);
+    const select = vi
+      .spyOn(client, "selectShortestRouteIntersection")
+      .mockResolvedValue({
+        intersection,
+        nearestCoordinate: { lat: 33.001, lng: -96.999 },
+        route: finalRoute,
+      });
+
+    const result = await client.processSite(coordinates);
+
+    expect(result.intersection.name).toBe("Main St & Oak Ave");
+    expect(reverseGeocode).toHaveBeenCalled();
+    // intersection search must be centered on the on-road anchor, not the raw centroid
+    expect(select).toHaveBeenCalledWith(
+      coordinates,
+      expect.objectContaining({ snappedPoint: { lat: 30.189, lng: -98.087 } })
+    );
+  });
+
+  it("falls back when the Roads API throws 'no snapped points' (production path)", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    vi.spyOn(client, "findNearestRoadPoint").mockRejectedValue(
+      new Error("Roads API returned no snapped points")
+    );
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue(onRoadAnchor);
+    vi.spyOn(client, "selectShortestRouteIntersection").mockResolvedValue({
+      intersection,
+      nearestCoordinate: { lat: 33.001, lng: -96.999 },
+      route: finalRoute,
+    });
+
+    const result = await client.processSite(coordinates);
+    expect(result.intersection.name).toBe("Main St & Oak Ave");
+  });
+
+  it("throws a clear error when the work area is not near any locatable road", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([]);
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue(null);
+
+    await expect(client.processSite(coordinates)).rejects.toThrow(/not near any/i);
+  });
+
+  it("asks for a manual intersection when no nearby intersection can be determined", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([]);
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue(onRoadAnchor);
+    vi.spyOn(client, "selectShortestRouteIntersection").mockResolvedValue(null);
+
+    await expect(client.processSite(coordinates)).rejects.toThrow(
+      /provide a nearby intersection manually/i
+    );
+  });
+
+  it("adds an off-road final-approach note when the boundary point is set back from the road", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([
+      { location: { lat: 33.0, lng: -97.0 }, originalIndex: 0 },
+    ]);
+    // Nearest road sits ~145 m from the arrival boundary point (33.001, -96.999).
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue({
+      street: "W Dove Rd", city: "Westlake", county: "Tarrant",
+      state: "Texas", stateCode: "TX", zip: "76262", lat: 33.0, lng: -97.0,
+    });
+    vi.spyOn(client, "selectShortestRouteIntersection").mockResolvedValue({
+      intersection,
+      nearestCoordinate: { lat: 33.001, lng: -96.999 },
+      route: finalRoute,
+    });
+
+    const result = await client.processSite(coordinates);
+    expect(result.directionsText).toContain("Work area is about");
+    expect(result.directionsText).toContain("off W Dove Rd");
+    expect(result.directionsText).toContain("enter the site (off-road)");
+  });
 });

@@ -247,4 +247,91 @@ describe("findIntersectionCandidates", () => {
     expect(result[0].name).toBe("Park Avenue & Oak Ave");
     expect(result[1].name).toBe("Elm St & 1st Ave");
   });
+
+  it("validates with normalized road names + city/state context", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [{
+          street1: "US Hwy 87", street2: "Co Rd 128", lat: "31.198", lng: "-99.495",
+          adminName2: "McCulloch", placeName: "Brady", adminName1: "Texas", adminCode1: "TX", postalcode: "76825",
+        }],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 31.198, lng: -99.495 } } }],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 31.198, -99.495, { maxCandidates: 1 });
+
+    // The validation (2nd) call must use the normalized names + locality context.
+    const validateUrl = decodeURIComponent(String(mockFetch.mock.calls[1][0]).replace(/\+/g, " "));
+    expect(validateUrl.includes("US Highway 87")).toBe(true);
+    expect(validateUrl.includes("County Road 128")).toBe(true);
+    expect(validateUrl.includes("Brady")).toBe(true);
+    expect(validateUrl.includes("TX")).toBe(true);
+
+    // Validated location is close to the GeoNames node, so it is accepted (no "(unverified)").
+    expect(result[0].name).toBe("US Hwy 87 & Co Rd 128");
+  });
+
+  it("uses Google's canonical cross-street names (with directionals) when validated", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [{
+          street1: "Dove Rd", street2: "N Pearson Ln", lat: "32.9823", lng: "-97.2006",
+          adminName2: "Tarrant", placeName: "Westlake", adminName1: "Texas", adminCode1: "TX", postalcode: "76262",
+        }],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{
+          types: ["intersection"],
+          formatted_address: "W Dove Rd & N Pearson Ln, Westlake, TX 76262, USA",
+          address_components: [],
+          geometry: { location: { lat: 32.9823, lng: -97.2006 } },
+        }],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 32.9823, -97.2006, { maxCandidates: 1 });
+
+    expect(result[0].name).toBe("W Dove Rd & N Pearson Ln");
+    expect(result[0].street1).toBe("W Dove Rd");
+    expect(result[0].street2).toBe("N Pearson Ln");
+  });
+
+  it("leaves a far-off validated location unverified (distance safeguard)", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [{
+          street1: "Co Rd 128", street2: "US Hwy 87", lat: "31.198", lng: "-99.495",
+          adminName2: "McCulloch", placeName: "Brady", adminName1: "Texas", adminCode1: "TX", postalcode: "76825",
+        }],
+      }),
+    });
+    // Google returns an intersection type, but far away (wrong place).
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{ types: ["intersection"], address_components: [], geometry: { location: { lat: 32.0, lng: -99.0 } } }],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 31.198, -99.495, { maxCandidates: 1 });
+
+    expect(result[0].name).toBe("Co Rd 128 & US Hwy 87 (unverified)");
+    expect(result[0].lat).toBeCloseTo(31.198, 3);
+    expect(result[0].lng).toBeCloseTo(-99.495, 3);
+  });
 });

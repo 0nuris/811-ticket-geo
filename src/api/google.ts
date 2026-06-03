@@ -5,6 +5,7 @@ import type {
   RouteResult,
   SnappedPoint,
 } from "../types.js";
+import { normalizeRoadName } from "../parsers/normalize.js";
 
 const NEAREST_ROADS_URL = "https://roads.googleapis.com/v1/nearestRoads";
 const GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json";
@@ -19,6 +20,11 @@ interface AddressComponents {
   zip?: string;
   lat?: number;
   lng?: number;
+  // Canonical intersection name parsed from a Google `intersection` result's
+  // formatted_address (the two cross streets are not in address_components).
+  intersectionName?: string;
+  intersectionStreet1?: string;
+  intersectionStreet2?: string;
 }
 
 function parseAddressComponents(result: Record<string, unknown>): AddressComponents {
@@ -131,13 +137,30 @@ export async function reverseGeocode(
 export async function googleValidates(
   apiKey: string,
   street1: string,
-  street2: string
+  street2: string,
+  context?: { city?: string; stateCode?: string }
 ): Promise<AddressComponents | null> {
-  const results = await geocodeRequest(apiKey, { address: `${street1} and ${street2}` });
+  // Normalize road-name abbreviations (Co Rd -> County Road, US Hwy -> US
+  // Highway) and add city/state context; Google resolves the intersection type
+  // far more reliably than for the bare TIGER form with no locality.
+  const s1 = normalizeRoadName(street1);
+  const s2 = normalizeRoadName(street2);
+  const parts = [context?.city, context?.stateCode].filter(Boolean);
+  const suffix = parts.length ? `, ${parts.join(", ")}` : "";
+  const results = await geocodeRequest(apiKey, { address: `${s1} and ${s2}${suffix}` });
   for (const result of results) {
     const types = (result.types ?? []) as string[];
     if (types.includes("intersection")) {
-      return parseAddressComponents(result);
+      const info = parseAddressComponents(result);
+      // The two cross streets are only in formatted_address ("A & B, city, ...").
+      const head = String(result.formatted_address ?? "").split(",")[0].trim();
+      const streets = head.split(/\s*&\s*/);
+      if (streets.length === 2 && streets[0] && streets[1]) {
+        info.intersectionStreet1 = streets[0];
+        info.intersectionStreet2 = streets[1];
+        info.intersectionName = `${streets[0]} & ${streets[1]}`;
+      }
+      return info;
     }
   }
   return null;
