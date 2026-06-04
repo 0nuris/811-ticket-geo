@@ -942,6 +942,36 @@ function polygonCentroid(coordinates) {
   }
   return { lat: lat / count, lng: lng / count };
 }
+function coordinateKey(coordinate) {
+  return `${coordinate.lat},${coordinate.lng}`;
+}
+function boundingBoxExtremeOrigins(coordinates, snappedPoints, primary) {
+  if (coordinates.length === 0) return [];
+  const snapByIndex = /* @__PURE__ */ new Map();
+  for (const sp of snappedPoints) {
+    if (!snapByIndex.has(sp.originalIndex)) snapByIndex.set(sp.originalIndex, sp.location);
+  }
+  let minLat = 0;
+  let maxLat = 0;
+  let minLng = 0;
+  let maxLng = 0;
+  coordinates.forEach((c, i) => {
+    if (c.lat < coordinates[minLat].lat) minLat = i;
+    if (c.lat > coordinates[maxLat].lat) maxLat = i;
+    if (c.lng < coordinates[minLng].lng) minLng = i;
+    if (c.lng > coordinates[maxLng].lng) maxLng = i;
+  });
+  const seen = /* @__PURE__ */ new Set([coordinateKey(primary)]);
+  const origins = [];
+  for (const idx of [minLat, maxLat, minLng, maxLng]) {
+    const origin = snapByIndex.get(idx) ?? coordinates[idx];
+    const key = coordinateKey(origin);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    origins.push(origin);
+  }
+  return origins;
+}
 var TicketGeoClient = class {
   googleApiKey;
   geonamesUsername;
@@ -1111,10 +1141,22 @@ var TicketGeoClient = class {
       routeResult = await this.computeRoute(intersection, startCoordinate, heading);
       if (!routeResult) throw new Error("Could not compute route from intersection to site");
     } else {
-      const selected = await this.selectShortestRouteIntersection(coordinates, {
+      let selected = await this.selectShortestRouteIntersection(coordinates, {
         snappedPoint: bestSnapped,
         preferredRoad: snapStreet ?? void 0
       });
+      if (!selected) {
+        let bestRouteMeters = Infinity;
+        for (const origin of boundingBoxExtremeOrigins(coordinates, snappedPoints, bestSnapped)) {
+          const candidate = await this.selectShortestRouteIntersection(coordinates, {
+            snappedPoint: origin
+          });
+          if (candidate && candidate.route.distanceMeters < bestRouteMeters) {
+            selected = candidate;
+            bestRouteMeters = candidate.route.distanceMeters;
+          }
+        }
+      }
       if (!selected) throw new Error("No nearby intersection could be determined automatically; provide a nearby intersection manually");
       intersection = selected.intersection;
       startCoordinate = selected.nearestCoordinate;

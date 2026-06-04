@@ -731,6 +731,76 @@ describe("TicketGeoClient.processSite", () => {
     );
   });
 
+  // New subdivisions: the interior streets snap tightly but have no GeoNames
+  // intersection within the (free-tier-capped) 1 km radius, while the bounding
+  // roads at the polygon's edges do. The single tightest-snap search therefore
+  // fails on exactly the point that can't resolve. When the primary search
+  // comes back empty, retry from the bounding-box extreme vertices and keep the
+  // shortest routed result.
+  it("falls back to boundary-extreme vertices when the primary snapped point yields no intersection, choosing the shortest route", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    // idx4 (interior) snaps exactly onto the road → becomes the primary search
+    // point. idx0..3 are the bbox extremes (min/max lat, min/max lng) and snap
+    // slightly off-vertex. Each origin gets a distinct lng so the mock can route
+    // by snapped point.
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([
+      { location: { lat: 33.0001, lng: -96.98 }, originalIndex: 0 }, // min lat
+      { location: { lat: 33.0201, lng: -96.987 }, originalIndex: 1 }, // max lat
+      { location: { lat: 33.01, lng: -96.9999 }, originalIndex: 2 }, // min lng
+      { location: { lat: 33.01, lng: -96.9701 }, originalIndex: 3 }, // max lng
+      { location: { lat: 33.01, lng: -96.985 }, originalIndex: 4 }, // interior → primary
+    ]);
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue({
+      street: "Interior Dr",
+      city: "Celina",
+      county: "Denton",
+      state: "Texas",
+      stateCode: "TX",
+      zip: "75009",
+      lat: 33.01,
+      lng: -96.985,
+    });
+
+    const westResult = {
+      intersection: { ...intersection, name: "West Gate & Frontage" },
+      nearestCoordinate: { lat: 33.01, lng: -97.0 },
+      route: { ...finalRoute, distanceMeters: 500 },
+    };
+    const eastResult = {
+      intersection: { ...intersection, name: "East Gate & Frontage" },
+      nearestCoordinate: { lat: 33.01, lng: -96.97 },
+      route: { ...finalRoute, distanceMeters: 200 },
+    };
+
+    const select = vi
+      .spyOn(client, "selectShortestRouteIntersection")
+      .mockImplementation(async (_coords, opts) => {
+        const lng = opts?.snappedPoint?.lng;
+        if (lng === -96.9701) return eastResult; // idx3 corner — shortest route
+        if (lng === -96.9999) return westResult; // idx2 corner — longer route
+        return null; // primary (interior) and the remaining corners: nothing
+      });
+
+    const coords: Coordinate[] = [
+      { lat: 33.0, lng: -96.98 },
+      { lat: 33.02, lng: -96.987 },
+      { lat: 33.01, lng: -97.0 },
+      { lat: 33.01, lng: -96.97 },
+      { lat: 33.01, lng: -96.985 },
+    ];
+
+    const result = await client.processSite(coords);
+
+    // Primary point returned null, so the fallback must have searched more points.
+    expect(select.mock.calls.length).toBeGreaterThan(1);
+    // The shortest routed candidate among the boundary vertices wins.
+    expect(result.intersection.name).toBe("East Gate & Frontage");
+  });
+
   it("adds an off-road final-approach note when the boundary point is set back from the road", async () => {
     const client = new TicketGeoClient({
       googleMapsApiKey: "test-key",

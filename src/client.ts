@@ -102,6 +102,53 @@ function polygonCentroid(coordinates: Coordinate[]): Coordinate {
   return { lat: lat / count, lng: lng / count };
 }
 
+function coordinateKey(coordinate: Coordinate): string {
+  return `${coordinate.lat},${coordinate.lng}`;
+}
+
+// Search origins for the lazy intersection fallback: the bounding-box extreme
+// vertices of the work area (min/max lat, min/max lng), mapped onto their
+// snapped road point when one exists. These sit on the polygon perimeter, where
+// through-roads — and therefore mapped GeoNames/TIGER intersections — actually
+// are, unlike a tightly-snapped interior point on a new subdivision street.
+// The set is deduplicated, has the already-tried `primary` point removed, and is
+// naturally capped at four points so the fallback's API cost stays bounded
+// regardless of how many vertices the polygon has.
+function boundingBoxExtremeOrigins(
+  coordinates: Coordinate[],
+  snappedPoints: SnappedPoint[],
+  primary: Coordinate
+): Coordinate[] {
+  if (coordinates.length === 0) return [];
+
+  const snapByIndex = new Map<number, Coordinate>();
+  for (const sp of snappedPoints) {
+    if (!snapByIndex.has(sp.originalIndex)) snapByIndex.set(sp.originalIndex, sp.location);
+  }
+
+  let minLat = 0;
+  let maxLat = 0;
+  let minLng = 0;
+  let maxLng = 0;
+  coordinates.forEach((c, i) => {
+    if (c.lat < coordinates[minLat].lat) minLat = i;
+    if (c.lat > coordinates[maxLat].lat) maxLat = i;
+    if (c.lng < coordinates[minLng].lng) minLng = i;
+    if (c.lng > coordinates[maxLng].lng) maxLng = i;
+  });
+
+  const seen = new Set<string>([coordinateKey(primary)]);
+  const origins: Coordinate[] = [];
+  for (const idx of [minLat, maxLat, minLng, maxLng]) {
+    const origin = snapByIndex.get(idx) ?? coordinates[idx];
+    const key = coordinateKey(origin);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    origins.push(origin);
+  }
+  return origins;
+}
+
 export class TicketGeoClient {
   private readonly googleApiKey: string;
   private readonly geonamesUsername: string;
@@ -339,10 +386,29 @@ export class TicketGeoClient {
       routeResult = await this.computeRoute(intersection, startCoordinate, heading);
       if (!routeResult) throw new Error("Could not compute route from intersection to site");
     } else {
-      const selected = await this.selectShortestRouteIntersection(coordinates, {
+      let selected = await this.selectShortestRouteIntersection(coordinates, {
         snappedPoint: bestSnapped,
         preferredRoad: snapStreet ?? undefined,
       });
+
+      // Lazy fallback: the tightest-snap point can land on an interior street
+      // that has no mapped intersection within range (new subdivisions), while
+      // the work area's bounding roads do. Only when the primary search comes
+      // back empty, retry from the bounding-box extreme vertices and keep the
+      // shortest routed result. Working sites never reach this path.
+      if (!selected) {
+        let bestRouteMeters = Infinity;
+        for (const origin of boundingBoxExtremeOrigins(coordinates, snappedPoints, bestSnapped)) {
+          const candidate = await this.selectShortestRouteIntersection(coordinates, {
+            snappedPoint: origin,
+          });
+          if (candidate && candidate.route.distanceMeters < bestRouteMeters) {
+            selected = candidate;
+            bestRouteMeters = candidate.route.distanceMeters;
+          }
+        }
+      }
+
       if (!selected) throw new Error("No nearby intersection could be determined automatically; provide a nearby intersection manually");
 
       intersection = selected.intersection;
