@@ -808,12 +808,15 @@ function buildResult(ix, googleInfo) {
     googleInfo = null;
   }
   if (googleInfo) {
+    const hasGoogleIdentity = Boolean(
+      googleInfo.intersectionName && googleInfo.intersectionStreet1 && googleInfo.intersectionStreet2 && googleInfo.lat !== void 0 && googleInfo.lng !== void 0
+    );
     return {
-      name: googleInfo.intersectionName || name,
-      street1: googleInfo.intersectionStreet1 || ix.street1,
-      street2: googleInfo.intersectionStreet2 || ix.street2,
-      lat: googleInfo.lat ?? ixLat,
-      lng: googleInfo.lng ?? ixLng,
+      name: hasGoogleIdentity ? googleInfo.intersectionName : name,
+      street1: hasGoogleIdentity ? googleInfo.intersectionStreet1 : ix.street1,
+      street2: hasGoogleIdentity ? googleInfo.intersectionStreet2 : ix.street2,
+      lat: hasGoogleIdentity ? googleInfo.lat : ixLat,
+      lng: hasGoogleIdentity ? googleInfo.lng : ixLng,
       county: googleInfo.county ?? ix.adminName2,
       city: googleInfo.city ?? ix.placeName,
       state: googleInfo.state ?? ix.adminName1,

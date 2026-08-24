@@ -55,12 +55,27 @@ function buildResult(ix: GeoNamesCandidate, googleInfo?: GoogleInfo | null): Int
   if (googleInfo) {
     // Prefer Google's canonical cross-street names (they carry directionals like
     // "W Dove Rd" that the GeoNames/TIGER names often drop); fall back to GeoNames.
+    //
+    // The name and the location must come from the SAME source. Google's cross
+    // streets are only readable from formatted_address, so when that parse fails
+    // the old per-field fallbacks reported the GeoNames pair at Google's point --
+    // up to MAX_VALIDATION_DISTANCE_METERS away, which is a road over in a
+    // subdivision. The ticket then named one intersection while the driving
+    // directions started at another. Keep the GeoNames node in that case.
+    const hasGoogleIdentity = Boolean(
+      googleInfo.intersectionName &&
+        googleInfo.intersectionStreet1 &&
+        googleInfo.intersectionStreet2 &&
+        googleInfo.lat !== undefined &&
+        googleInfo.lng !== undefined
+    );
+
     return {
-      name: googleInfo.intersectionName || name,
-      street1: googleInfo.intersectionStreet1 || ix.street1,
-      street2: googleInfo.intersectionStreet2 || ix.street2,
-      lat: googleInfo.lat ?? ixLat,
-      lng: googleInfo.lng ?? ixLng,
+      name: hasGoogleIdentity ? googleInfo.intersectionName! : name,
+      street1: hasGoogleIdentity ? googleInfo.intersectionStreet1! : ix.street1,
+      street2: hasGoogleIdentity ? googleInfo.intersectionStreet2! : ix.street2,
+      lat: hasGoogleIdentity ? googleInfo.lat! : ixLat,
+      lng: hasGoogleIdentity ? googleInfo.lng! : ixLng,
       county: googleInfo.county ?? ix.adminName2,
       city: googleInfo.city ?? ix.placeName,
       state: googleInfo.state ?? ix.adminName1,

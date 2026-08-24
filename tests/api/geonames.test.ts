@@ -335,3 +335,41 @@ describe("findIntersectionCandidates", () => {
     expect(result[0].lng).toBeCloseTo(-99.495, 3);
   });
 });
+
+describe("intersection identity consistency", () => {
+  it("keeps the GeoNames node when Google's cross streets are unreadable", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [{
+          street1: "Elm St", street2: "Oak Ave", lat: "33.0", lng: "-97.0",
+          adminName2: "Collin", placeName: "Celina", adminName1: "Texas", adminCode1: "TX", postalcode: "75009",
+        }],
+      }),
+    });
+    // Google confirms an intersection ~400 m away (inside the distance guard),
+    // but its formatted_address carries no "A & B" pair, so the cross streets
+    // cannot be read from it.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{
+          types: ["intersection"],
+          formatted_address: "Elm St, Celina, TX 75009, USA",
+          address_components: [],
+          geometry: { location: { lat: 33.0036, lng: -97.0 } },
+        }],
+      }),
+    });
+
+    const result = await findIntersectionCandidates("google-key", "geouser", 33.0, -97.0, { maxCandidates: 1 });
+
+    // The reported name is the GeoNames pair, so the reported location must be
+    // the GeoNames node. Taking Google's point here puts the ticket's named
+    // intersection a road away from where the driving directions start.
+    expect(result[0].name).toBe("Elm St & Oak Ave");
+    expect(result[0].lat).toBeCloseTo(33.0, 4);
+    expect(result[0].lng).toBeCloseTo(-97.0, 4);
+  });
+});
