@@ -157,21 +157,20 @@ declare class TicketGeoClient {
     findNearestIntersection(lat: number, lng: number, options?: FindIntersectionOptions): Promise<Intersection | null>;
     computeRoute(origin: Coordinate, destination: Coordinate, heading?: number): Promise<RouteResult | null>;
     /**
-     * Selects the intersection with the shortest routed distance among a
-     * single candidate from each populated quadrant around the snapped point.
+     * Selects the intersection with the shortest routed distance to the work area.
      *
      * Strategy: Query GeoNames for candidate intersections within radiusKm of the
-     * snapped road point, then select the nearest candidate from each cardinal
-     * quadrant (N/E/S/W) relative to the snap point. This ensures geographic
-     * coverage — a linearly closer intersection may have a longer driving route
-     * due to road topology (highway barriers, one-way streets, etc.). Each
-     * selected candidate is routed to its nearest polygon vertex; the shortest
-     * route wins.
+     * snapped road point, route each one to its nearest polygon vertex, and keep
+     * the shortest drive. Routing is what decides — a linearly closer intersection
+     * routinely has a longer drive (dead ends, divided roads, one-ways), which is
+     * exactly the case a straight-line ranking gets wrong.
      *
-     * This quadrant-based heuristic intentionally limits routed candidates to
-     * reduce false positives caused by rivers, dead ends, and other topology
-     * quirks. A previous scout-and-requery approach could discover intersections
-     * beyond radiusKm, but was less deterministic and harder to reason about.
+     * Candidate count is bounded by maxCandidates (the API-cost knob), so every
+     * candidate is routed. An earlier version additionally kept only the linearly
+     * nearest candidate per compass quadrant; candidates cluster on the road-network
+     * side of a site, so the two best routinely shared a quadrant and the better one
+     * was discarded before it was ever routed. See the ticket-2673195855 case in
+     * tests/client.test.ts.
      */
     selectShortestRouteIntersection(coordinates: Coordinate[], options?: SelectIntersectionOptions): Promise<IntersectionSelectionResult | null>;
     processSite(coordinates: Coordinate[], options?: ProcessSiteOptions): Promise<SiteResult>;

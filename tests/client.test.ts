@@ -298,12 +298,11 @@ describe("TicketGeoClient.selectShortestRouteIntersection", () => {
     expect(reverseGeocode).toHaveBeenCalledOnce();
   });
 
-  it("routes one candidate per cardinal quadrant, deduplicating same-quadrant candidates", async () => {
-    // 3 candidates: two to the north (same quadrant), one to the south.
-    // Snap point is at 33.0, -97.0.
-    // "Far North" at 33.01 and "Near North" at 33.005 are both due north (quadrant 0).
-    // "South" at 32.999 is due south (quadrant 2).
-    // Only 2 routes should be computed: nearest-north + south.
+  it("routes every candidate, including two in the same direction", async () => {
+    // 3 candidates: two to the north, one to the south, off a snap point at
+    // 33.0, -97.0. All three are routed -- an earlier version kept only the
+    // linearly nearest of the two northern candidates and never routed the
+    // other, which is how ticket 2673195855 named the wrong intersection.
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -359,11 +358,76 @@ describe("TicketGeoClient.selectShortestRouteIntersection", () => {
       { snappedPoint: { lat: 33.0, lng: -97.0 }, maxCandidates: 3 }
     );
 
-    // 2 quadrants populated (north + south), so 2 routes
-    expect(computeRoute).toHaveBeenCalledTimes(2);
+    expect(computeRoute).toHaveBeenCalledTimes(3);
   });
 
-  it("allows an unverified candidate to win when it survives quadrant selection and has the shortest route", async () => {
+  it("routes a same-quadrant candidate that is linearly farther but a much shorter drive (ticket 2673195855)", async () => {
+    // Real geometry from Texas 811 ticket 2673195855. Both intersections sit in
+    // quadrant 1 off the snapped point (bearings 49 and 66 degrees):
+    //   Hunter Valley Cir & Beth Rd -- 121 m linear, 893 m drive
+    //   Avondale Farms Dr & Beth Rd -- 210 m linear, 215 m drive  <- correct
+    // The work area fronts Avondale Farms Dr; picking Hunter Valley Cir named an
+    // intersection one road over from where the directions actually turn in.
+    const polygon = [
+      { lat: 32.964932624460815, lng: -97.41036305134332 },
+      { lat: 32.96388844037916, lng: -97.40859279339818 },
+      { lat: 32.962565189375034, lng: -97.409933897898 },
+      { lat: 32.96362739243081, lng: -97.4117685288649 },
+      { lat: 32.96414048594272, lng: -97.41135010425953 },
+      { lat: 32.96467157959702, lng: -97.41142520611223 },
+    ];
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        intersection: [
+          { street1: "Beth Rd", street2: "Hunter Valley Cir", lat: "32.965472", lng: "-97.409232", adminName2: "Tarrant", placeName: "Fort Worth", adminName1: "Texas", adminCode1: "TX", postalcode: "76052" },
+          { street1: "Avondale Farms Dr", street2: "Beth Rd", lat: "32.965389", lng: "-97.407136", adminName2: "Tarrant", placeName: "Fort Worth", adminName1: "Texas", adminCode1: "TX", postalcode: "76052" },
+        ],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{
+          types: ["intersection"],
+          formatted_address: "Hunter Valley Cir & Beth Rd, Fort Worth, TX 76052, USA",
+          address_components: [],
+          geometry: { location: { lat: 32.965472, lng: -97.409232 } },
+        }],
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [{
+          types: ["intersection"],
+          formatted_address: "Avondale Farms Dr & Beth Rd, Fort Worth, TX 76052, USA",
+          address_components: [],
+          geometry: { location: { lat: 32.9653675, lng: -97.4071971 } },
+        }],
+      }),
+    });
+
+    const client = new TicketGeoClient({ googleMapsApiKey: "test-key", geonamesUsername: "test-user" });
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue({ street: "Beth Rd", lat: 32.96363, lng: -97.41177 });
+    vi.spyOn(client, "computeRoute").mockImplementation(async (origin) => ({
+      steps: [],
+      distanceMeters: origin.lng < -97.408 ? 893 : 215,
+    }));
+
+    const result = await client.selectShortestRouteIntersection(polygon, {
+      snappedPoint: { lat: 32.96363045404449, lng: -97.41176532426978 },
+      preferredRoad: "Beth Rd",
+    });
+
+    expect(result!.intersection.street1).toBe("Avondale Farms Dr");
+    expect(result!.route.distanceMeters).toBe(215);
+  });
+
+  it("allows an unverified candidate to win when it has the shortest route", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
