@@ -44,6 +44,8 @@ export interface BoundingBox {
 export interface SiteResult {
   coordinates: Coordinate[];
   intersection: Intersection;
+  /** Drive length of the chosen route, intersection to arrival vertex. */
+  routeMeters: number;
   directionsText: string;
   markingText: string;
   areaAcres: number;

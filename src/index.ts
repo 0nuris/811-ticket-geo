@@ -27,3 +27,4 @@ export { formatDirections, formatMarkingText, formatManualDirections } from "./d
 export type { ManualDirectionsArgs } from "./directions/format.js";
 export { TicketGeoClient } from "./client.js";
 export { MAX_INTERSECTION_DISTANCE_METERS } from "./api/google.js";
+export { isLimitedAccessRoad } from "./selection.js";

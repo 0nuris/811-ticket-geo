@@ -1557,6 +1557,7 @@ var TicketGeoClient = class {
     return {
       coordinates: orderedCoordinates,
       intersection,
+      routeMeters: routeResult.distanceMeters,
       directionsText,
       markingText,
       areaAcres,
@@ -1573,6 +1574,7 @@ export {
   formatManualDirections,
   formatMarkingText,
   geoMeasure,
+  isLimitedAccessRoad,
   parseStreet,
   polygonAreaAcres,
   simplifyPolygon,

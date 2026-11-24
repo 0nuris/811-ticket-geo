@@ -28,6 +28,7 @@ __export(index_exports, {
   formatManualDirections: () => formatManualDirections,
   formatMarkingText: () => formatMarkingText,
   geoMeasure: () => geoMeasure,
+  isLimitedAccessRoad: () => isLimitedAccessRoad,
   parseStreet: () => parseStreet,
   polygonAreaAcres: () => polygonAreaAcres,
   simplifyPolygon: () => simplifyPolygon,
@@ -1595,6 +1596,7 @@ var TicketGeoClient = class {
     return {
       coordinates: orderedCoordinates,
       intersection,
+      routeMeters: routeResult.distanceMeters,
       directionsText,
       markingText,
       areaAcres,
@@ -1612,6 +1614,7 @@ var TicketGeoClient = class {
   formatManualDirections,
   formatMarkingText,
   geoMeasure,
+  isLimitedAccessRoad,
   parseStreet,
   polygonAreaAcres,
   simplifyPolygon,

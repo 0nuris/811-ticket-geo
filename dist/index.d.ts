@@ -38,6 +38,8 @@ interface BoundingBox {
 interface SiteResult {
     coordinates: Coordinate[];
     intersection: Intersection;
+    /** Drive length of the chosen route, intersection to arrival vertex. */
+    routeMeters: number;
     directionsText: string;
     markingText: string;
     areaAcres: number;
@@ -224,4 +226,7 @@ declare class TicketGeoClient {
 
 declare const MAX_INTERSECTION_DISTANCE_METERS = 8000;
 
-export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSearchContext, type IntersectionSelectionResult, MAX_INTERSECTION_DISTANCE_METERS, type ManualDirectionsArgs, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };
+/** Interstates, tollways and freeways; their frontage and service roads are local. */
+declare function isLimitedAccessRoad(name: string): boolean;
+
+export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSearchContext, type IntersectionSelectionResult, MAX_INTERSECTION_DISTANCE_METERS, type ManualDirectionsArgs, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, isLimitedAccessRoad, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };

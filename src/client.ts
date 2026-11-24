@@ -732,6 +732,7 @@ export class TicketGeoClient {
     return {
       coordinates: orderedCoordinates,
       intersection,
+      routeMeters: routeResult.distanceMeters,
       directionsText,
       markingText,
       areaAcres,
