@@ -28,8 +28,11 @@ import {
 import { distanceToArea } from "./api/google.js";
 import {
   isLimitedAccessRoad,
+  eligibleRoadNames,
   offRoadMeters,
+  pairNamesNeeded,
   pointBeyond,
+  ROUTE_BOUND_SLACK_METERS,
   ringPoints,
   roadNamePairs,
   routeJunctions,
@@ -122,8 +125,12 @@ function polygonCentroid(coordinates: Coordinate[]): Coordinate {
 const DEFAULT_MAX_CANDIDATES = 8;
 const RING_RADII_KM = [1.5, 3];
 const RING_POINTS = 8;
-// Every pair among the 8 nearest road names.
+// Pairs of the nearest road names, nearest first (reaches the 11th name).
 const MAX_ROAD_NAME_PAIRS = 28;
+const ROAD_NAMES_NEEDED = pairNamesNeeded(MAX_ROAD_NAME_PAIRS);
+// Candidates routed before the rest are checked against the best score so far.
+const FIRST_ROUTE_WAVE = 2;
+const MEMO_LIMIT = 5000;
 // GeoNames lacks many subdivision crossings; past this score, also ask Google
 // about pairs of the site's own roads (docs/decisions.md, "Choosing the intersection").
 const ROAD_NAME_SEARCH_ABOVE_METERS = 300;
@@ -221,10 +228,23 @@ function boundingBoxExtremeOrigins(
 export class TicketGeoClient {
   private readonly googleApiKey: string;
   private readonly geonamesUsername: string;
+  // The selection asks the same question from several paths (a junction that is
+  // also a pair, a vertex retried); each billable answer is fetched once.
+  private readonly memo = new Map<string, Promise<unknown>>();
 
   constructor(config: ClientConfig) {
     this.googleApiKey = config.googleMapsApiKey;
     this.geonamesUsername = config.geonamesUsername;
+  }
+
+  private remember<T>(key: string, load: () => Promise<T>): Promise<T> {
+    let hit = this.memo.get(key) as Promise<T> | undefined;
+    if (!hit) {
+      if (this.memo.size >= MEMO_LIMIT) this.memo.clear();
+      hit = load();
+      this.memo.set(key, hit);
+    }
+    return hit;
   }
 
   async findNearestRoadPoint(coordinates: Coordinate[]): Promise<SnappedPoint[]> {
@@ -234,14 +254,16 @@ export class TicketGeoClient {
   }
 
   async reverseGeocode(lat: number, lng: number): Promise<ReverseGeocodeResult | null> {
-    return apiReverseGeocode(this.googleApiKey, lat, lng);
+    return this.remember(`rev|${lat},${lng}`, () => apiReverseGeocode(this.googleApiKey, lat, lng));
   }
 
   async geocodeIntersection(
     address: string,
     context?: IntersectionSearchContext
   ): Promise<Intersection | null> {
-    return apiGeocodeIntersection(this.googleApiKey, address, context);
+    return this.remember(`ix|${address}|${JSON.stringify(context ?? {})}`, () =>
+      apiGeocodeIntersection(this.googleApiKey, address, context)
+    );
   }
 
   async findNearestIntersection(
@@ -263,7 +285,9 @@ export class TicketGeoClient {
     destination: Coordinate,
     heading?: number
   ): Promise<RouteResult | null> {
-    return apiComputeRoute(this.googleApiKey, origin, destination, heading);
+    return this.remember(`route|${origin.lat},${origin.lng}|${destination.lat},${destination.lng}|${heading}`, () =>
+      apiComputeRoute(this.googleApiKey, origin, destination, heading)
+    );
   }
 
   /**
@@ -332,24 +356,34 @@ export class TicketGeoClient {
     coordinates: Coordinate[],
     candidates: Intersection[]
   ): Promise<IntersectionSelectionResult | null> {
-    const routed = await Promise.all(
-      candidates.map(async (candidate) => {
-        const nearest = nearestCoordinateToTarget(coordinates, candidate);
-        if (!nearest) return null;
-        const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
-        const route = await this.computeRoute(candidate, nearest.coordinate, heading);
-        if (!route) return null;
-        return {
-          result: {
-            intersection: candidate,
-            nearestCoordinate: nearest.coordinate,
-            route,
-            score: selectionScore(route, candidate, nearest.coordinate),
-          },
-          linear: nearest.distanceMeters,
-        };
-      })
-    );
+    type Routed = { result: IntersectionSelectionResult; linear: number; order: number };
+    const entries = candidates
+      .map((candidate, order) => ({ candidate, order, nearest: nearestCoordinateToTarget(coordinates, candidate) }))
+      .filter((e): e is { candidate: Intersection; order: number; nearest: { coordinate: Coordinate; distanceMeters: number } } => e.nearest !== null)
+      .sort((a, b) => a.nearest.distanceMeters - b.nearest.distanceMeters);
+
+    const routeOne = async ({ candidate, order, nearest }: (typeof entries)[number]): Promise<Routed | null> => {
+      const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
+      const route = await this.computeRoute(candidate, nearest.coordinate, heading);
+      if (!route) return null;
+      return {
+        result: { intersection: candidate, nearestCoordinate: nearest.coordinate, route, score: selectionScore(route, candidate, nearest.coordinate) },
+        linear: nearest.distanceMeters,
+        order,
+      };
+    };
+
+    // Nearest first; a candidate farther (in a straight line) than the best
+    // score so far cannot win, so it is never routed.
+    const firstWave = (await Promise.all(entries.slice(0, FIRST_ROUTE_WAVE).map(routeOne))).filter((r): r is Routed => r !== null);
+    const bounded = firstWave.length > 0 && firstWave.every((r) => r.result.route.endLocation);
+    const bestSoFar = Math.min(...firstWave.map((r) => r.result.score));
+    const rest = entries
+      .slice(FIRST_ROUTE_WAVE)
+      .filter((e) => !bounded || e.nearest.distanceMeters <= bestSoFar + ROUTE_BOUND_SLACK_METERS);
+    const routed = [...firstWave, ...(await Promise.all(rest.map(routeOne)))]
+      .filter((r): r is Routed => r !== null)
+      .sort((a, b) => a.order - b.order);
 
     let best: { result: IntersectionSelectionResult; linear: number } | null = null;
     for (const entry of routed) {
@@ -386,7 +420,10 @@ export class TicketGeoClient {
         seen.add(key);
         return true;
       })
-      .slice(0, ARRIVAL_ALTERNATIVES);
+      .slice(0, ARRIVAL_ALTERNATIVES)
+      .filter(
+        (v) => !route.endLocation || geoMeasure(intersection, v).distanceMeters <= selected.score + ROUTE_BOUND_SLACK_METERS
+      );
 
     const tried = await Promise.all(
       alternatives.map(async (vertex) => {
@@ -509,7 +546,13 @@ export class TicketGeoClient {
       ...vertices.map((v) => pointBeyond(center, v, 250)),
       ...ringPoints(center, 0.75, RING_POINTS),
     ];
-    const roads = await mapLimit(probes, PROBE_CONCURRENCY, (p) => this.reverseGeocode(p.lat, p.lng));
+    // In order, a batch at a time, until enough names exist to fill the pairs.
+    const roads: Array<ReverseGeocodeResult | null> = [];
+    for (let i = 0; i < probes.length; i += PROBE_CONCURRENCY) {
+      const batch = probes.slice(i, i + PROBE_CONCURRENCY);
+      roads.push(...(await Promise.all(batch.map((p) => this.reverseGeocode(p.lat, p.lng)))));
+      if (eligibleRoadNames(roads.map((r) => r?.street ?? "")).length >= ROAD_NAMES_NEEDED) break;
+    }
     const names = roads.map((r) => r?.street ?? "").filter(Boolean);
     const pairs = roadNamePairs(names, MAX_ROAD_NAME_PAIRS);
     const found = await mapLimit(pairs, PROBE_CONCURRENCY, ([a, b]) =>

@@ -102,11 +102,39 @@ areas (one per site from 830 Texas 811 tickets, 2026-10-25 to 2026-11-24, 17 cou
 | Toll road / U-turn | 2 / 4 | 1 / 0 |
 | Off-road walk over 500 ft | 8 | 3 |
 | Staff's intersection is the shorter drive | 15/49 | 1/50 (by 29 m) |
-| Median / max drive | 305 m / 14.9 km | 125 m / 1.5 km |
+| Median / max drive | 305 m / 14.9 km | 121 m / 1.5 km |
 
 The remaining ramp and toll are one site that lies along the President George Bush Turnpike.
 The three long walks are field sites where no nearby vertex is closer to a road.
 
-**Cost.** Live, 8 of the sites: 18 to 102 API calls and 0.5 to 4.7 s per site, under the API's
-15 s geocode timeout. Probes run at most 10 at a time: a burst past Google's per-second limit
-comes back empty rather than as an error.
+**Latency.** Live, 8 of the sites: 0.5 to 4.7 s per site, under the API's 15 s geocode
+timeout. Probes run at most 10 at a time: a burst past Google's per-second limit comes back
+empty rather than as an error.
+
+## Request cost
+
+**What Google bills** (Routes, Geocoding and Roads usage-and-billing and pricing pages, read
+2026-11-24):
+
+- A Compute Routes request with an origin `heading` bills as **Pro** ($10 per 1,000, 5,000 free
+  a month); without it, ours is **Essentials** ($5, 10,000 free). `computeAlternativeRoutes`,
+  `avoidTolls`, `avoidHighways` and our field mask are not listed as triggers.
+- Forward and reverse geocoding share the Geocoding SKU ($5 per 1,000, 10,000 free).
+- Roads `nearestRoads` bills as Pro per request ($10 per 1,000, 5,000 free), up to 100 points.
+- Google leaves zero values out of responses: 2 of 758 recorded routes, from an intersection
+  beside its vertex, had no `distanceMeters`. Reading that as `NaN` had picked the wrong
+  intersection at two sites; `computeRoute` now reads it as 0.
+
+**What the client does to ask less**, with results identical on all 120 runs of the 60-site
+replay (automatic and staff-typed):
+
+- Remembers each route, reverse geocode and typed-intersection lookup per client: the same
+  question came from several paths 142 times.
+- Routes candidates nearest first and skips any whose straight line to its vertex exceeds the
+  best score so far plus 50 m. A score is never below that line (checked on all 758 routes).
+- Stops reverse-geocoding probes once 11 road names exist: 28 pairs never reach a 12th.
+
+Automatic runs went from 2,267 Google calls to 1,938, and routes from 648 to 380.
+
+**Kept on purpose.** Dropping `heading` would bill routes as Essentials, but measured live it
+changed 2 of 60 picks, each about 120 m longer (146 to 278 m, 168 to 287 m).

@@ -366,7 +366,8 @@ export async function computeRoute(
     const end = (leg as { endLocation?: { latLng?: { latitude: number; longitude: number } } }).endLocation?.latLng;
     return {
       steps: leg.steps as unknown as RouteResult["steps"],
-      distanceMeters: chosen.distanceMeters,
+      // A missing distance is a zero-length route; see docs/decisions.md, "Request cost".
+      distanceMeters: chosen.distanceMeters ?? 0,
       localizedValues: leg.localizedValues as RouteResult["localizedValues"],
       ...(end ? { endLocation: { lat: end.latitude, lng: end.longitude } } : {}),
     };

@@ -167,7 +167,9 @@ declare function formatMarkingText(coordinates: Coordinate[]): string;
 declare class TicketGeoClient {
     private readonly googleApiKey;
     private readonly geonamesUsername;
+    private readonly memo;
     constructor(config: ClientConfig);
+    private remember;
     findNearestRoadPoint(coordinates: Coordinate[]): Promise<SnappedPoint[]>;
     reverseGeocode(lat: number, lng: number): Promise<ReverseGeocodeResult | null>;
     geocodeIntersection(address: string, context?: IntersectionSearchContext): Promise<Intersection | null>;

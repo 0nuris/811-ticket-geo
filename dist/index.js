@@ -831,7 +831,8 @@ async function computeRoute(apiKey, origin, destination, heading) {
     const end = leg.endLocation?.latLng;
     return {
       steps: leg.steps,
-      distanceMeters: chosen.distanceMeters,
+      // A missing distance is a zero-length route; see docs/decisions.md, "Request cost".
+      distanceMeters: chosen.distanceMeters ?? 0,
       localizedValues: leg.localizedValues,
       ...end ? { endLocation: { lat: end.latitude, lng: end.longitude } } : {}
     };
@@ -989,7 +990,7 @@ function ringPoints(center, radiusKm, count) {
     };
   });
 }
-function roadNamePairs(names, max) {
+function eligibleRoadNames(names) {
   const seen = /* @__PURE__ */ new Set();
   const roads = [];
   for (const raw of names) {
@@ -999,12 +1000,21 @@ function roadNamePairs(names, max) {
     seen.add(key);
     roads.push(name);
   }
+  return roads;
+}
+function roadNamePairs(names, max) {
+  const roads = eligibleRoadNames(names);
   const pairs = [];
   for (let i = 0; i < roads.length; i++) {
     for (let j = i + 1; j < roads.length; j++) pairs.push({ pair: [roads[i], roads[j]], rank: i + j, i });
   }
   return pairs.sort((a, b) => a.rank - b.rank || a.i - b.i).slice(0, max).map((p) => p.pair);
 }
+function pairNamesNeeded(max) {
+  const names = Array.from({ length: max + 2 }, (_, i) => `Road ${i}`);
+  return Math.max(...roadNamePairs(names, max).flat().map((n) => names.indexOf(n))) + 1;
+}
+var ROUTE_BOUND_SLACK_METERS = 50;
 function stepRoad(instruction) {
   const line = instruction.split("\n")[0];
   const m = /\b(?:onto|on)\s+(.+?)(?:\s+toward\b.*|\s+heading\b.*)?$/i.exec(line);
@@ -1107,6 +1117,9 @@ var DEFAULT_MAX_CANDIDATES = 8;
 var RING_RADII_KM = [1.5, 3];
 var RING_POINTS = 8;
 var MAX_ROAD_NAME_PAIRS = 28;
+var ROAD_NAMES_NEEDED = pairNamesNeeded(MAX_ROAD_NAME_PAIRS);
+var FIRST_ROUTE_WAVE = 2;
+var MEMO_LIMIT = 5e3;
 var ROAD_NAME_SEARCH_ABOVE_METERS = 300;
 var ARRIVAL_RETRY_OFFROAD_METERS = 100;
 var ARRIVAL_ALTERNATIVES = 4;
@@ -1175,9 +1188,21 @@ function boundingBoxExtremeOrigins(coordinates, snappedPoints, primary) {
 var TicketGeoClient = class {
   googleApiKey;
   geonamesUsername;
+  // The selection asks the same question from several paths (a junction that is
+  // also a pair, a vertex retried); each billable answer is fetched once.
+  memo = /* @__PURE__ */ new Map();
   constructor(config) {
     this.googleApiKey = config.googleMapsApiKey;
     this.geonamesUsername = config.geonamesUsername;
+  }
+  remember(key, load) {
+    let hit = this.memo.get(key);
+    if (!hit) {
+      if (this.memo.size >= MEMO_LIMIT) this.memo.clear();
+      hit = load();
+      this.memo.set(key, hit);
+    }
+    return hit;
   }
   async findNearestRoadPoint(coordinates) {
     const result = await findNearestRoadPoint(this.googleApiKey, coordinates);
@@ -1185,10 +1210,13 @@ var TicketGeoClient = class {
     return result;
   }
   async reverseGeocode(lat, lng) {
-    return reverseGeocode(this.googleApiKey, lat, lng);
+    return this.remember(`rev|${lat},${lng}`, () => reverseGeocode(this.googleApiKey, lat, lng));
   }
   async geocodeIntersection(address, context) {
-    return geocodeIntersection(this.googleApiKey, address, context);
+    return this.remember(
+      `ix|${address}|${JSON.stringify(context ?? {})}`,
+      () => geocodeIntersection(this.googleApiKey, address, context)
+    );
   }
   async findNearestIntersection(lat, lng, options) {
     return findNearestIntersection(
@@ -1200,7 +1228,10 @@ var TicketGeoClient = class {
     );
   }
   async computeRoute(origin, destination, heading) {
-    return computeRoute(this.googleApiKey, origin, destination, heading);
+    return this.remember(
+      `route|${origin.lat},${origin.lng}|${destination.lat},${destination.lng}|${heading}`,
+      () => computeRoute(this.googleApiKey, origin, destination, heading)
+    );
   }
   /**
    * Selects the intersection with the shortest routed distance to the work area.
@@ -1254,24 +1285,22 @@ var TicketGeoClient = class {
    * each other, the linearly nearer candidate wins.
    */
   async routeCandidates(coordinates, candidates) {
-    const routed = await Promise.all(
-      candidates.map(async (candidate) => {
-        const nearest = nearestCoordinateToTarget(coordinates, candidate);
-        if (!nearest) return null;
-        const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
-        const route = await this.computeRoute(candidate, nearest.coordinate, heading);
-        if (!route) return null;
-        return {
-          result: {
-            intersection: candidate,
-            nearestCoordinate: nearest.coordinate,
-            route,
-            score: selectionScore(route, candidate, nearest.coordinate)
-          },
-          linear: nearest.distanceMeters
-        };
-      })
-    );
+    const entries = candidates.map((candidate, order) => ({ candidate, order, nearest: nearestCoordinateToTarget(coordinates, candidate) })).filter((e) => e.nearest !== null).sort((a, b) => a.nearest.distanceMeters - b.nearest.distanceMeters);
+    const routeOne = async ({ candidate, order, nearest }) => {
+      const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
+      const route = await this.computeRoute(candidate, nearest.coordinate, heading);
+      if (!route) return null;
+      return {
+        result: { intersection: candidate, nearestCoordinate: nearest.coordinate, route, score: selectionScore(route, candidate, nearest.coordinate) },
+        linear: nearest.distanceMeters,
+        order
+      };
+    };
+    const firstWave = (await Promise.all(entries.slice(0, FIRST_ROUTE_WAVE).map(routeOne))).filter((r) => r !== null);
+    const bounded = firstWave.length > 0 && firstWave.every((r) => r.result.route.endLocation);
+    const bestSoFar = Math.min(...firstWave.map((r) => r.result.score));
+    const rest = entries.slice(FIRST_ROUTE_WAVE).filter((e) => !bounded || e.nearest.distanceMeters <= bestSoFar + ROUTE_BOUND_SLACK_METERS);
+    const routed = [...firstWave, ...await Promise.all(rest.map(routeOne))].filter((r) => r !== null).sort((a, b) => a.order - b.order);
     let best = null;
     for (const entry of routed) {
       if (!entry) continue;
@@ -1296,7 +1325,9 @@ var TicketGeoClient = class {
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
-    }).slice(0, ARRIVAL_ALTERNATIVES);
+    }).slice(0, ARRIVAL_ALTERNATIVES).filter(
+      (v) => !route.endLocation || geoMeasure(intersection, v).distanceMeters <= selected.score + ROUTE_BOUND_SLACK_METERS
+    );
     const tried = await Promise.all(
       alternatives.map(async (vertex) => {
         const r = await this.computeRoute(intersection, vertex, geoMeasure(intersection, vertex).bearingDegrees);
@@ -1389,7 +1420,12 @@ var TicketGeoClient = class {
       ...vertices.map((v) => pointBeyond(center, v, 250)),
       ...ringPoints(center, 0.75, RING_POINTS)
     ];
-    const roads = await mapLimit(probes, PROBE_CONCURRENCY, (p) => this.reverseGeocode(p.lat, p.lng));
+    const roads = [];
+    for (let i = 0; i < probes.length; i += PROBE_CONCURRENCY) {
+      const batch = probes.slice(i, i + PROBE_CONCURRENCY);
+      roads.push(...await Promise.all(batch.map((p) => this.reverseGeocode(p.lat, p.lng))));
+      if (eligibleRoadNames(roads.map((r) => r?.street ?? "")).length >= ROAD_NAMES_NEEDED) break;
+    }
     const names = roads.map((r) => r?.street ?? "").filter(Boolean);
     const pairs = roadNamePairs(names, MAX_ROAD_NAME_PAIRS);
     const found = await mapLimit(

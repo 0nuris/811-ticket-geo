@@ -62,11 +62,8 @@ export function ringPoints(center: Coordinate, radiusKm: number, count: number):
   });
 }
 
-/**
- * Distinct, non-freeway road names paired for an intersection lookup, at most
- * `max` pairs. Names arrive nearest-first; pairs of near roads come first.
- */
-export function roadNamePairs(names: string[], max: number): Array<[string, string]> {
+/** Road names worth pairing, nearest first: no repeats, unnamed roads or freeways. */
+export function eligibleRoadNames(names: string[]): string[] {
   const seen = new Set<string>();
   const roads: string[] = [];
   for (const raw of names) {
@@ -76,6 +73,15 @@ export function roadNamePairs(names: string[], max: number): Array<[string, stri
     seen.add(key);
     roads.push(name);
   }
+  return roads;
+}
+
+/**
+ * Distinct, non-freeway road names paired for an intersection lookup, at most
+ * `max` pairs. Names arrive nearest-first; pairs of near roads come first.
+ */
+export function roadNamePairs(names: string[], max: number): Array<[string, string]> {
+  const roads = eligibleRoadNames(names);
   const pairs: Array<{ pair: [string, string]; rank: number; i: number }> = [];
   for (let i = 0; i < roads.length; i++) {
     for (let j = i + 1; j < roads.length; j++) pairs.push({ pair: [roads[i], roads[j]], rank: i + j, i });
@@ -85,6 +91,17 @@ export function roadNamePairs(names: string[], max: number): Array<[string, stri
     .slice(0, max)
     .map((p) => p.pair);
 }
+
+/** How many names roadNamePairs(names, max) can reach; later names never pair. */
+export function pairNamesNeeded(max: number): number {
+  const names = Array.from({ length: max + 2 }, (_, i) => `Road ${i}`);
+  return Math.max(...roadNamePairs(names, max).flat().map((n) => names.indexOf(n))) + 1;
+}
+
+// A route's score is at least the straight line from its intersection to its
+// arrival vertex (drive plus off-road walk covers that distance); the slack
+// covers Google starting the drive a little off the intersection point.
+export const ROUTE_BOUND_SLACK_METERS = 50;
 
 /** The road a Google step puts you on: "Turn left onto Domingo Dr" -> "Domingo Dr". */
 export function stepRoad(instruction: string): string | null {

@@ -355,3 +355,15 @@ describe("computeRoute", () => {
     expect(result).toBeNull();
   });
 });
+
+describe("computeRoute zero-length routes", () => {
+  it("reads a missing distanceMeters as 0, the way Google omits zero values", async () => {
+    // Ticket 2681489209: the intersection sat beside the vertex and the route came back with no distanceMeters.
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ routes: [{ legs: [{ steps: [], endLocation: { latLng: { latitude: 32.7727, longitude: -96.8053 } } }] }] }),
+    });
+    const result = await computeRoute("test-key", { lat: 32.7727, lng: -96.8053 }, { lat: 32.7726, lng: -96.8050 });
+    expect(result!.distanceMeters).toBe(0);
+  });
+});
