@@ -134,7 +134,25 @@ replay (automatic and staff-typed):
   best score so far plus 50 m. A score is never below that line (checked on all 758 routes).
 - Stops reverse-geocoding probes once 11 road names exist: 28 pairs never reach a 12th.
 
-Automatic runs went from 2,267 Google calls to 1,938, and routes from 648 to 380.
+- Looks up the road name at the drive end only when an off-road line is printed (82 of 110
+  runs print none), and no longer reverse-geocodes for a preferred road the caller did not
+  give: with every candidate routed and scored, that road only orders ties.
 
-**Kept on purpose.** Dropping `heading` would bill routes as Essentials, but measured live it
-changed 2 of 60 picks, each about 120 m longer (146 to 278 m, 168 to 287 m).
+Automatic runs went from 2,267 Google calls to 1,893, and routes from 648 to 380.
+
+**Measured and not adopted** (each against the same 60 sites, live where new requests were
+needed):
+
+- Dropping `heading` (routes bill as Essentials): 2 of 60 picks change, each about 120 m
+  longer (146 to 278 m, 168 to 287 m).
+- Confirming only the winning GeoNames candidate with Google instead of all 8: 1,622 calls
+  instead of 1,893 (geocodes 893 to 571, routes 380 to 431), but 8 of 60 picks change, one
+  132 m longer and one 331 m shorter.
+- Using every route name in a reverse-geocode response for the pair search: more names make
+  more pairs, so calls rise to 1,936; one pick improves by 92 m.
+- Skipping the Roads call for a typed intersection (its snap only picks where to read the
+  locality; the polygon centroid works): 60 fewer Roads calls on 60 typed runs, the same
+  intersection and acceptance on all 60, but 2 texts change (a header city, a 16 ft route).
+- OpenStreetMap through the public Overpass API, to compute crossings instead of pairing
+  names: it had Creekview Dr & S New Rd, which GeoNames lacks, but answered in 33 to 43 s or
+  with 502s, against the API's 15 s timeout. Rural Wilbarger roads carry numbers, not names.

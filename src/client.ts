@@ -329,8 +329,9 @@ export class TicketGeoClient {
 
     if (!snappedPoint) return null;
 
-    const preferredRoad = options?.preferredRoad
-      ?? (await this.reverseGeocode(snappedPoint.lat, snappedPoint.lng))?.street;
+    // Every candidate is routed and scored, so the preferred road only orders ties;
+    // it is not worth a reverse geocode when the caller has none.
+    const preferredRoad = options?.preferredRoad;
 
     const candidates = await apiFindIntersectionCandidates(
       this.googleApiKey,
@@ -749,15 +750,15 @@ export class TicketGeoClient {
     // Measured from where the drive stops. A reverse-geocode result's location is
     // the matched feature's point (often mid-road), which overstated a 160 ft walk
     // as 2,763 ft on a 495-acre site.
+    // The road name is only printed with an off-road line, so it is looked up only then.
     let finalApproach: { distanceFeet: number; cardinal: string; roadName?: string } | undefined;
     const driveEnd = routeResult.endLocation;
-    const arrivalRoad = driveEnd
-      ? await this.reverseGeocode(driveEnd.lat, driveEnd.lng)
-      : await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
-    const roadPoint = driveEnd ?? (arrivalRoad ? { lat: arrivalRoad.lat, lng: arrivalRoad.lng } : null);
+    const fallbackRoad = driveEnd ? null : await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
+    const roadPoint = driveEnd ?? (fallbackRoad ? { lat: fallbackRoad.lat, lng: fallbackRoad.lng } : null);
     if (roadPoint) {
       const { distanceMeters, bearingDegrees } = geoMeasure(roadPoint, startCoordinate);
       if (distanceMeters > 30) {
+        const arrivalRoad = driveEnd ? await this.reverseGeocode(driveEnd.lat, driveEnd.lng) : fallbackRoad;
         finalApproach = {
           distanceFeet: Math.round(distanceMeters * 3.28084),
           cardinal: bearingToCardinal(bearingDegrees),

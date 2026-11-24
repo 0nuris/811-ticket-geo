@@ -257,7 +257,8 @@ describe("TicketGeoClient.selectShortestRouteIntersection", () => {
     expect(reverseGeocode).not.toHaveBeenCalled();
   });
 
-  it("calls reverseGeocode when preferredRoad is omitted", async () => {
+  it("does not reverse-geocode for a preferred road the caller did not give", async () => {
+    // Every candidate is routed and scored, so the preferred road only orders ties.
     mockFetch.mockResolvedValueOnce({
       ok: true,
       json: async () => ({
@@ -291,12 +292,13 @@ describe("TicketGeoClient.selectShortestRouteIntersection", () => {
       distanceMeters: 100,
     });
 
-    await client.selectShortestRouteIntersection(
+    const result = await client.selectShortestRouteIntersection(
       [{ lat: 33.0, lng: -97.0 }],
       { snappedPoint: { lat: 33.0, lng: -97.0 } }
     );
 
-    expect(reverseGeocode).toHaveBeenCalledOnce();
+    expect(reverseGeocode).not.toHaveBeenCalled();
+    expect(result!.intersection.name).toBe("Elm St & 1st Ave");
   });
 
   it("routes every candidate, including two in the same direction", async () => {
@@ -1006,5 +1008,29 @@ describe("TicketGeoClient intersection choice (measured on 60 RPMx sites)", () =
     const result = await client.processSite(square);
     expect(order).toEqual(["ring", "pairs"]);
     expect(result.intersection.name).toBe("Aledo Rd & Aledo Connector Rd");
+  });
+});
+
+describe("TicketGeoClient off-road road name", () => {
+  it("looks up the road at the drive end only when an off-road line is printed", async () => {
+    const client = new TicketGeoClient({ googleMapsApiKey: "k", geonamesUsername: "u" });
+    const square: Coordinate[] = [
+      { lat: 33.0, lng: -97.0 }, { lat: 33.001, lng: -97.0 }, { lat: 33.001, lng: -96.999 }, { lat: 33.0, lng: -96.999 },
+    ];
+    const ix: Intersection = {
+      name: "Main St & Oak Ave", street1: "Main St", street2: "Oak Ave", lat: 33.0005, lng: -97.0005,
+      county: "Tarrant", city: "Fort Worth", state: "Texas", stateCode: "TX", zip: "76101",
+    };
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([{ location: { lat: 33.0, lng: -97.0 }, originalIndex: 0 }]);
+    const reverse = vi.spyOn(client, "reverseGeocode").mockResolvedValue({
+      street: "Main St", city: "Fort Worth", county: "Tarrant", state: "Texas", stateCode: "TX", zip: "76101", lat: 33.0, lng: -97.0,
+    });
+    vi.spyOn(client, "selectShortestRouteIntersection").mockResolvedValue({
+      intersection: ix, nearestCoordinate: square[0], score: 60,
+      route: { distanceMeters: 60, steps: [], endLocation: { lat: 33.00005, lng: -97.0 } }, // ~6 m from the vertex
+    });
+    const result = await client.processSite(square);
+    expect(result.directionsText).toContain("Arrive at the work area");
+    expect(reverse).toHaveBeenCalledTimes(1); // the snap's road and locality only
   });
 });

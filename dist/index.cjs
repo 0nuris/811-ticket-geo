@@ -1304,7 +1304,7 @@ var TicketGeoClient = class {
       }
     }
     if (!snappedPoint) return null;
-    const preferredRoad = options?.preferredRoad ?? (await this.reverseGeocode(snappedPoint.lat, snappedPoint.lng))?.street;
+    const preferredRoad = options?.preferredRoad;
     const candidates = await findIntersectionCandidates(
       this.googleApiKey,
       this.geonamesUsername,
@@ -1613,11 +1613,12 @@ var TicketGeoClient = class {
     }
     let finalApproach;
     const driveEnd = routeResult.endLocation;
-    const arrivalRoad = driveEnd ? await this.reverseGeocode(driveEnd.lat, driveEnd.lng) : await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
-    const roadPoint = driveEnd ?? (arrivalRoad ? { lat: arrivalRoad.lat, lng: arrivalRoad.lng } : null);
+    const fallbackRoad = driveEnd ? null : await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
+    const roadPoint = driveEnd ?? (fallbackRoad ? { lat: fallbackRoad.lat, lng: fallbackRoad.lng } : null);
     if (roadPoint) {
       const { distanceMeters, bearingDegrees } = geoMeasure(roadPoint, startCoordinate);
       if (distanceMeters > 30) {
+        const arrivalRoad = driveEnd ? await this.reverseGeocode(driveEnd.lat, driveEnd.lng) : fallbackRoad;
         finalApproach = {
           distanceFeet: Math.round(distanceMeters * 3.28084),
           cardinal: bearingToCardinal(bearingDegrees),
