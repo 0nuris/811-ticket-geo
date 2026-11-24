@@ -4,6 +4,7 @@ import {
   reverseGeocode,
   geocodeIntersection,
   computeRoute,
+  buildIntersectionQuery,
 } from "../../src/api/google.js";
 
 const mockFetch = vi.fn();
@@ -96,6 +97,7 @@ describe("geocodeIntersection", () => {
       json: async () => ({
         status: "OK",
         results: [{
+          types: ["intersection"],
           address_components: [
             { types: ["locality"], long_name: "Dallas", short_name: "Dallas" },
             { types: ["administrative_area_level_2"], long_name: "Dallas County", short_name: "Dallas County" },
@@ -120,6 +122,135 @@ describe("geocodeIntersection", () => {
       stateCode: "TX",
       zip: "75201",
     });
+  });
+
+  // Ticket 5390P (rejected draft, 2026-11-20): work area in Keller, TX; the user
+  // typed "Main & Johnson" and the ticket was drafted from Lynnwood-Pricedale, PA.
+  const keller5390P = [
+    { lat: 32.943752726620374, lng: -97.25124478340149 },
+    { lat: 32.94182591572986, lng: -97.25118041038515 },
+    { lat: 32.94178089628186, lng: -97.25278973579408 },
+    { lat: 32.943806748750504, lng: -97.25380897521974 },
+  ];
+  const kellerContext = { area: keller5390P, city: "Keller", stateCode: "TX" };
+
+  function geocodeResponse(results: Array<Record<string, unknown>>) {
+    return { ok: true, json: async () => ({ status: "OK", results }) };
+  }
+
+  function requestedParams(): URLSearchParams {
+    return new URL(mockFetch.mock.calls[0][0] as string).searchParams;
+  }
+
+  it("rejects the partial-match transit stops Google returns for bare cross-street text", async () => {
+    mockFetch.mockResolvedValueOnce(geocodeResponse([
+      {
+        formatted_address: "Main / Johnson, Visalia, CA 93291, USA",
+        types: ["establishment", "point_of_interest", "transit_station"],
+        partial_match: true,
+        address_components: [],
+        geometry: { location: { lat: 36.3300267, lng: -119.2994027 } },
+      },
+      {
+        formatted_address: "Main @ Johnson, Lynnwood-Pricedale, PA 15012, USA",
+        types: ["establishment", "point_of_interest", "transit_station"],
+        partial_match: true,
+        address_components: [
+          { types: ["locality"], long_name: "Lynnwood-Pricedale", short_name: "Lynnwood-Pricedale" },
+          { types: ["administrative_area_level_2"], long_name: "Westmoreland County", short_name: "Westmoreland County" },
+        ],
+        geometry: { location: { lat: 40.137286, lng: -79.85638 } },
+      },
+    ]));
+
+    expect(await geocodeIntersection("test-key", "Main & Johnson")).toBeNull();
+  });
+
+  it("scopes the query to the work area's locality, state, and surroundings", async () => {
+    mockFetch.mockResolvedValueOnce(geocodeResponse([]));
+
+    await geocodeIntersection("test-key", "Main & Johnson", kellerContext);
+
+    const params = requestedParams();
+    expect(params.get("address")).toBe("Main & Johnson, Keller, TX");
+    expect(params.get("components")).toBe("country:US|administrative_area:TX");
+    const [sw, ne] = params.get("bounds")!.split("|").map((p) => p.split(",").map(Number));
+    expect(sw[0]).toBeLessThan(32.9417);
+    expect(sw[1]).toBeLessThan(-97.2538);
+    expect(ne[0]).toBeGreaterThan(32.9438);
+    expect(ne[1]).toBeGreaterThan(-97.2512);
+  });
+
+  it("rejects a road-level partial match near the site because it is not an intersection", async () => {
+    mockFetch.mockResolvedValueOnce(geocodeResponse([{
+      formatted_address: "N Main St, Keller, TX, USA",
+      types: ["route"],
+      partial_match: true,
+      address_components: [],
+      geometry: { location: { lat: 32.9529711, lng: -97.2543608 } },
+    }]));
+
+    expect(await geocodeIntersection("test-key", "Main & Johnson", kellerContext)).toBeNull();
+  });
+
+  it("skips an intersection farther than 8 km from the work area and takes the nearby one", async () => {
+    mockFetch.mockResolvedValueOnce(geocodeResponse([
+      {
+        formatted_address: "N Main St & Johnson Ave, Cleburne, TX 76031, USA",
+        types: ["intersection"],
+        address_components: [],
+        geometry: { location: { lat: 32.3917976, lng: -97.3894157 } },
+      },
+      {
+        formatted_address: "N Main St & Johnson Rd, Keller, TX 76248, USA",
+        types: ["intersection"],
+        address_components: [
+          { types: ["locality"], long_name: "Keller", short_name: "Keller" },
+          { types: ["administrative_area_level_2"], long_name: "Tarrant County", short_name: "Tarrant County" },
+          { types: ["administrative_area_level_1"], long_name: "Texas", short_name: "TX" },
+          { types: ["postal_code"], long_name: "76248", short_name: "76248" },
+        ],
+        geometry: { location: { lat: 32.9417163, lng: -97.2538407 } },
+      },
+    ]));
+
+    const result = await geocodeIntersection("test-key", "Main & Johnson Rd", kellerContext);
+
+    expect(result).toEqual({
+      name: "N Main St & Johnson Rd",
+      street1: "N Main St",
+      street2: "Johnson Rd",
+      lat: 32.9417163,
+      lng: -97.2538407,
+      city: "Keller",
+      county: "Tarrant County",
+      state: "Texas",
+      stateCode: "TX",
+      zip: "76248",
+    });
+  });
+
+  it("returns null when the only intersection is beyond 8 km of the work area", async () => {
+    mockFetch.mockResolvedValueOnce(geocodeResponse([{
+      formatted_address: "N Main St & Johnson Ave, Cleburne, TX 76031, USA",
+      types: ["intersection"],
+      address_components: [],
+      geometry: { location: { lat: 32.3917976, lng: -97.3894157 } },
+    }]));
+
+    expect(await geocodeIntersection("test-key", "Main St & Johnson Ave", kellerContext)).toBeNull();
+  });
+
+  it("keeps a locality the user typed instead of the work area's city", () => {
+    const params = buildIntersectionQuery("Main St & Johnson Rd, Fort Worth", kellerContext);
+    expect(params.address).toBe("Main St & Johnson Rd, Fort Worth");
+  });
+
+  it("expands abbreviated road names the way Google matches intersections", () => {
+    const params = buildIntersectionQuery("FM 1171 and Co Rd 128");
+    expect(params.address).toBe("Farm to Market 1171 & County Road 128");
+    expect(params.components).toBe("country:US");
+    expect(params.bounds).toBeUndefined();
   });
 
   it("returns null when geocode fails", async () => {

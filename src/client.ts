@@ -3,6 +3,7 @@ import type {
   Coordinate,
   FindIntersectionOptions,
   Intersection,
+  IntersectionSearchContext,
   IntersectionSelectionResult,
   ProcessSiteOptions,
   ReverseGeocodeResult,
@@ -168,8 +169,11 @@ export class TicketGeoClient {
     return apiReverseGeocode(this.googleApiKey, lat, lng);
   }
 
-  async geocodeIntersection(address: string): Promise<Intersection | null> {
-    return apiGeocodeIntersection(this.googleApiKey, address);
+  async geocodeIntersection(
+    address: string,
+    context?: IntersectionSearchContext
+  ): Promise<Intersection | null> {
+    return apiGeocodeIntersection(this.googleApiKey, address, context);
   }
 
   async findNearestIntersection(
@@ -360,10 +364,14 @@ export class TicketGeoClient {
     let routeResult: RouteResult | null = null;
 
     if (intersectionOverride) {
-      intersection = await this.geocodeIntersection(intersectionOverride);
+      intersection = await this.geocodeIntersection(intersectionOverride, {
+        area: coordinates,
+        city: snapRoadInfo?.city,
+        stateCode: snapRoadInfo?.stateCode,
+      });
       if (!intersection) {
         throw new Error(
-          `Intersection override "${intersectionOverride}" could not be geocoded`
+          `Intersection override "${intersectionOverride}" could not be geocoded near the work area`
         );
       }
     }

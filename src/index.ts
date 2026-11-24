@@ -15,6 +15,7 @@ export type {
   FindIntersectionOptions,
   SelectIntersectionOptions,
   IntersectionSelectionResult,
+  IntersectionSearchContext,
 } from "./types.js";
 
 export { geoMeasure, bearingToCardinal } from "./geo/measure.js";
@@ -25,3 +26,4 @@ export { parseStreet, streetsMatch } from "./parsers/street.js";
 export { formatDirections, formatMarkingText, formatManualDirections } from "./directions/format.js";
 export type { ManualDirectionsArgs } from "./directions/format.js";
 export { TicketGeoClient } from "./client.js";
+export { MAX_INTERSECTION_DISTANCE_METERS } from "./api/google.js";

@@ -51,6 +51,15 @@ export interface ProcessSiteOptions {
   intersectionOverride?: string;
 }
 
+/** Where a hand-entered intersection is expected to be. */
+export interface IntersectionSearchContext {
+  /** Work area (or entrance) points; the result must lie near one of them. */
+  area?: Coordinate[];
+  /** Appended to the text when it names no locality. */
+  city?: string;
+  stateCode?: string;
+}
+
 export interface SnappedPoint {
   location: Coordinate;
   originalIndex: number;

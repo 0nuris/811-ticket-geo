@@ -20,6 +20,7 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
+  MAX_INTERSECTION_DISTANCE_METERS: () => MAX_INTERSECTION_DISTANCE_METERS,
   TicketGeoClient: () => TicketGeoClient,
   bearingToCardinal: () => bearingToCardinal,
   boundingBoxFeet: () => boundingBoxFeet,
@@ -700,38 +701,80 @@ async function googleValidates(apiKey, street1, street2, context) {
     const types = result.types ?? [];
     if (types.includes("intersection")) {
       const info = parseAddressComponents(result);
-      const head = String(result.formatted_address ?? "").split(",")[0].trim();
-      const streets = head.split(/\s*&\s*/);
-      if (streets.length === 2 && streets[0] && streets[1]) {
-        info.intersectionStreet1 = streets[0];
-        info.intersectionStreet2 = streets[1];
-        info.intersectionName = `${streets[0]} & ${streets[1]}`;
+      const streets = parseIntersectionStreets(result);
+      if (streets) {
+        info.intersectionStreet1 = streets.street1;
+        info.intersectionStreet2 = streets.street2;
+        info.intersectionName = streets.name;
       }
       return info;
     }
   }
   return null;
 }
-async function geocodeIntersection(apiKey, addressString) {
-  const normalized = addressString.replace(/\s+and\s+/i, " & ");
-  const results = await geocodeRequest(apiKey, { address: normalized });
-  if (results.length === 0) return null;
-  const info = parseAddressComponents(results[0]);
-  if (info.lat === void 0 || info.lng === void 0) return null;
-  let street1 = "";
-  let street2 = "";
-  const split = normalized.split(/\s+&\s+/);
-  if (split.length === 2) {
-    street1 = split[0].trim();
-    street2 = split[1].split(",")[0].trim();
-  } else {
-    street1 = normalized.trim();
+var MAX_INTERSECTION_DISTANCE_METERS = 8e3;
+var METERS_PER_DEGREE_LAT = 111320;
+function parseIntersectionStreets(result) {
+  const head = String(result.formatted_address ?? "").split(",")[0].trim();
+  const streets = head.split(/\s*&\s*/);
+  if (streets.length !== 2 || !streets[0] || !streets[1]) return null;
+  return { name: `${streets[0]} & ${streets[1]}`, street1: streets[0], street2: streets[1] };
+}
+function distanceToArea(point, area) {
+  let best = Infinity;
+  for (const vertex of area) {
+    best = Math.min(best, geoMeasure(point, vertex).distanceMeters);
   }
-  const name = street2 ? `${street1} & ${street2}` : street1;
+  return best;
+}
+function buildIntersectionQuery(text, context = {}) {
+  const [streetPart, ...localityParts] = text.trim().replace(/\s+and\s+/i, " & ").split(",");
+  const streets = streetPart.split(/\s*&\s*/).map((street) => normalizeRoadName(street)).join(" & ");
+  const typedLocality = localityParts.map((part) => part.trim()).filter(Boolean);
+  const locality = typedLocality.length ? typedLocality : [context.city, context.stateCode].filter((part) => Boolean(part));
+  const address = [streets, ...locality].join(", ");
+  const params = {
+    address,
+    components: context.stateCode ? `country:US|administrative_area:${context.stateCode}` : "country:US"
+  };
+  const area = context.area ?? [];
+  if (area.length > 0) {
+    const padLat = MAX_INTERSECTION_DISTANCE_METERS / METERS_PER_DEGREE_LAT;
+    const midLat = (Math.min(...area.map((c) => c.lat)) + Math.max(...area.map((c) => c.lat))) / 2;
+    const padLng = padLat / Math.max(Math.cos(midLat * Math.PI / 180), 0.1);
+    const south = Math.min(...area.map((c) => c.lat)) - padLat;
+    const west = Math.min(...area.map((c) => c.lng)) - padLng;
+    const north = Math.max(...area.map((c) => c.lat)) + padLat;
+    const east = Math.max(...area.map((c) => c.lng)) + padLng;
+    params.bounds = `${south},${west}|${north},${east}`;
+  }
+  return params;
+}
+function selectNearbyIntersection(results, area = []) {
+  for (const result of results) {
+    const types = result.types ?? [];
+    if (!types.includes("intersection")) continue;
+    if (area.length === 0) return result;
+    const { lat, lng } = parseAddressComponents(result);
+    if (lat === void 0 || lng === void 0) continue;
+    if (distanceToArea({ lat, lng }, area) <= MAX_INTERSECTION_DISTANCE_METERS) return result;
+  }
+  return null;
+}
+async function geocodeIntersection(apiKey, addressString, context) {
+  const results = await geocodeRequest(apiKey, buildIntersectionQuery(addressString, context));
+  const match = selectNearbyIntersection(results, context?.area);
+  if (!match) return null;
+  const info = parseAddressComponents(match);
+  if (info.lat === void 0 || info.lng === void 0) return null;
+  const typed = addressString.replace(/\s+and\s+/i, " & ").split(",")[0].split(/\s*&\s*/);
+  const streets = parseIntersectionStreets(match) ?? {
+    name: typed.map((s) => s.trim()).filter(Boolean).join(" & "),
+    street1: (typed[0] ?? "").trim(),
+    street2: (typed[1] ?? "").trim()
+  };
   return {
-    name,
-    street1,
-    street2,
+    ...streets,
     lat: info.lat,
     lng: info.lng,
     county: info.county ?? "",
@@ -990,8 +1033,8 @@ var TicketGeoClient = class {
   async reverseGeocode(lat, lng) {
     return reverseGeocode(this.googleApiKey, lat, lng);
   }
-  async geocodeIntersection(address) {
-    return geocodeIntersection(this.googleApiKey, address);
+  async geocodeIntersection(address, context) {
+    return geocodeIntersection(this.googleApiKey, address, context);
   }
   async findNearestIntersection(lat, lng, options) {
     return findNearestIntersection(
@@ -1122,10 +1165,14 @@ var TicketGeoClient = class {
     let startCoordinate = null;
     let routeResult = null;
     if (intersectionOverride) {
-      intersection = await this.geocodeIntersection(intersectionOverride);
+      intersection = await this.geocodeIntersection(intersectionOverride, {
+        area: coordinates,
+        city: snapRoadInfo?.city,
+        stateCode: snapRoadInfo?.stateCode
+      });
       if (!intersection) {
         throw new Error(
-          `Intersection override "${intersectionOverride}" could not be geocoded`
+          `Intersection override "${intersectionOverride}" could not be geocoded near the work area`
         );
       }
     }
@@ -1205,6 +1252,7 @@ var TicketGeoClient = class {
 };
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  MAX_INTERSECTION_DISTANCE_METERS,
   TicketGeoClient,
   bearingToCardinal,
   boundingBoxFeet,

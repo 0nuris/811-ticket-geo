@@ -73,6 +73,7 @@ describe("TicketGeoClient.geocodeIntersection", () => {
       json: async () => ({
         status: "OK",
         results: [{
+          types: ["intersection"],
           address_components: [],
           geometry: { location: { lat: 33.0, lng: -97.0 } },
         }],
@@ -589,7 +590,11 @@ describe("TicketGeoClient.processSite", () => {
       intersectionOverride: intersection.name,
     });
 
-    expect(geocodeIntersection).toHaveBeenCalledWith(intersection.name);
+    expect(geocodeIntersection).toHaveBeenCalledWith(intersection.name, {
+      area: coordinates,
+      city: "Fort Worth",
+      stateCode: "TX",
+    });
     expect(findNearestIntersection).not.toHaveBeenCalled();
     expect(computeRoute).toHaveBeenCalledWith(
       intersection,

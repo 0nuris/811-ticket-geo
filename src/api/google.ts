@@ -1,11 +1,13 @@
 import type {
   Coordinate,
   Intersection,
+  IntersectionSearchContext,
   ReverseGeocodeResult,
   RouteResult,
   SnappedPoint,
 } from "../types.js";
 import { normalizeRoadName } from "../parsers/normalize.js";
+import { geoMeasure } from "../geo/measure.js";
 
 const NEAREST_ROADS_URL = "https://roads.googleapis.com/v1/nearestRoads";
 const GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json";
@@ -152,13 +154,11 @@ export async function googleValidates(
     const types = (result.types ?? []) as string[];
     if (types.includes("intersection")) {
       const info = parseAddressComponents(result);
-      // The two cross streets are only in formatted_address ("A & B, city, ...").
-      const head = String(result.formatted_address ?? "").split(",")[0].trim();
-      const streets = head.split(/\s*&\s*/);
-      if (streets.length === 2 && streets[0] && streets[1]) {
-        info.intersectionStreet1 = streets[0];
-        info.intersectionStreet2 = streets[1];
-        info.intersectionName = `${streets[0]} & ${streets[1]}`;
+      const streets = parseIntersectionStreets(result);
+      if (streets) {
+        info.intersectionStreet1 = streets.street1;
+        info.intersectionStreet2 = streets.street2;
+        info.intersectionName = streets.name;
       }
       return info;
     }
@@ -166,33 +166,107 @@ export async function googleValidates(
   return null;
 }
 
-export async function geocodeIntersection(
-  apiKey: string,
-  addressString: string
-): Promise<Intersection | null> {
-  const normalized = addressString.replace(/\s+and\s+/i, " & ");
-  const results = await geocodeRequest(apiKey, { address: normalized });
-  if (results.length === 0) return null;
+// Farthest a hand-entered intersection may sit from the work area. The automatic
+// search looks within 1 km, so anything past ~5 miles is not the site's intersection.
+export const MAX_INTERSECTION_DISTANCE_METERS = 8000;
 
-  const info = parseAddressComponents(results[0]);
-  if (info.lat === undefined || info.lng === undefined) return null;
+const METERS_PER_DEGREE_LAT = 111_320;
 
-  let street1 = "";
-  let street2 = "";
-  const split = normalized.split(/\s+&\s+/);
-  if (split.length === 2) {
-    street1 = split[0].trim();
-    street2 = split[1].split(",")[0].trim();
-  } else {
-    street1 = normalized.trim();
+/** The cross streets of an `intersection` result, read from formatted_address ("A & B, city, ..."). */
+export function parseIntersectionStreets(
+  result: Record<string, unknown>
+): { name: string; street1: string; street2: string } | null {
+  const head = String(result.formatted_address ?? "").split(",")[0].trim();
+  const streets = head.split(/\s*&\s*/);
+  if (streets.length !== 2 || !streets[0] || !streets[1]) return null;
+  return { name: `${streets[0]} & ${streets[1]}`, street1: streets[0], street2: streets[1] };
+}
+
+/** Meters from point to the nearest of the area's points. */
+export function distanceToArea(point: Coordinate, area: Coordinate[]): number {
+  let best = Infinity;
+  for (const vertex of area) {
+    best = Math.min(best, geoMeasure(point, vertex).distanceMeters);
+  }
+  return best;
+}
+
+/**
+ * Geocode request params for hand-entered intersection text, scoped to where
+ * the intersection should be. See docs/decisions.md, "Hand-entered intersections".
+ */
+export function buildIntersectionQuery(
+  text: string,
+  context: IntersectionSearchContext = {}
+): Record<string, string> {
+  const [streetPart, ...localityParts] = text.trim().replace(/\s+and\s+/i, " & ").split(",");
+  const streets = streetPart
+    .split(/\s*&\s*/)
+    .map((street) => normalizeRoadName(street))
+    .join(" & ");
+  const typedLocality = localityParts.map((part) => part.trim()).filter(Boolean);
+  const locality = typedLocality.length
+    ? typedLocality
+    : [context.city, context.stateCode].filter((part): part is string => Boolean(part));
+  const address = [streets, ...locality].join(", ");
+
+  const params: Record<string, string> = {
+    address,
+    components: context.stateCode ? `country:US|administrative_area:${context.stateCode}` : "country:US",
+  };
+
+  const area = context.area ?? [];
+  if (area.length > 0) {
+    const padLat = MAX_INTERSECTION_DISTANCE_METERS / METERS_PER_DEGREE_LAT;
+    const midLat = (Math.min(...area.map((c) => c.lat)) + Math.max(...area.map((c) => c.lat))) / 2;
+    const padLng = padLat / Math.max(Math.cos((midLat * Math.PI) / 180), 0.1);
+    const south = Math.min(...area.map((c) => c.lat)) - padLat;
+    const west = Math.min(...area.map((c) => c.lng)) - padLng;
+    const north = Math.max(...area.map((c) => c.lat)) + padLat;
+    const east = Math.max(...area.map((c) => c.lng)) + padLng;
+    params.bounds = `${south},${west}|${north},${east}`;
   }
 
-  const name = street2 ? `${street1} & ${street2}` : street1;
+  return params;
+}
+
+/** First `intersection` result within MAX_INTERSECTION_DISTANCE_METERS of the area, if any. */
+export function selectNearbyIntersection(
+  results: Array<Record<string, unknown>>,
+  area: Coordinate[] = []
+): Record<string, unknown> | null {
+  for (const result of results) {
+    const types = (result.types ?? []) as string[];
+    if (!types.includes("intersection")) continue;
+    if (area.length === 0) return result;
+    const { lat, lng } = parseAddressComponents(result);
+    if (lat === undefined || lng === undefined) continue;
+    if (distanceToArea({ lat, lng }, area) <= MAX_INTERSECTION_DISTANCE_METERS) return result;
+  }
+  return null;
+}
+
+export async function geocodeIntersection(
+  apiKey: string,
+  addressString: string,
+  context?: IntersectionSearchContext
+): Promise<Intersection | null> {
+  const results = await geocodeRequest(apiKey, buildIntersectionQuery(addressString, context));
+  const match = selectNearbyIntersection(results, context?.area);
+  if (!match) return null;
+
+  const info = parseAddressComponents(match);
+  if (info.lat === undefined || info.lng === undefined) return null;
+
+  const typed = addressString.replace(/\s+and\s+/i, " & ").split(",")[0].split(/\s*&\s*/);
+  const streets = parseIntersectionStreets(match) ?? {
+    name: typed.map((s) => s.trim()).filter(Boolean).join(" & "),
+    street1: (typed[0] ?? "").trim(),
+    street2: (typed[1] ?? "").trim(),
+  };
 
   return {
-    name,
-    street1,
-    street2,
+    ...streets,
     lat: info.lat,
     lng: info.lng,
     county: info.county ?? "",

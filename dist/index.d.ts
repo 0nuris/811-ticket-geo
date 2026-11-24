@@ -43,6 +43,14 @@ interface SiteResult {
 interface ProcessSiteOptions {
     intersectionOverride?: string;
 }
+/** Where a hand-entered intersection is expected to be. */
+interface IntersectionSearchContext {
+    /** Work area (or entrance) points; the result must lie near one of them. */
+    area?: Coordinate[];
+    /** Appended to the text when it names no locality. */
+    city?: string;
+    stateCode?: string;
+}
 interface SnappedPoint {
     location: Coordinate;
     originalIndex: number;
@@ -153,7 +161,7 @@ declare class TicketGeoClient {
     constructor(config: ClientConfig);
     findNearestRoadPoint(coordinates: Coordinate[]): Promise<SnappedPoint[]>;
     reverseGeocode(lat: number, lng: number): Promise<ReverseGeocodeResult | null>;
-    geocodeIntersection(address: string): Promise<Intersection | null>;
+    geocodeIntersection(address: string, context?: IntersectionSearchContext): Promise<Intersection | null>;
     findNearestIntersection(lat: number, lng: number, options?: FindIntersectionOptions): Promise<Intersection | null>;
     computeRoute(origin: Coordinate, destination: Coordinate, heading?: number): Promise<RouteResult | null>;
     /**
@@ -176,4 +184,6 @@ declare class TicketGeoClient {
     processSite(coordinates: Coordinate[], options?: ProcessSiteOptions): Promise<SiteResult>;
 }
 
-export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSelectionResult, type ManualDirectionsArgs, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };
+declare const MAX_INTERSECTION_DISTANCE_METERS = 8000;
+
+export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSearchContext, type IntersectionSelectionResult, MAX_INTERSECTION_DISTANCE_METERS, type ManualDirectionsArgs, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };
