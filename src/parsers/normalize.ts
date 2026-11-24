@@ -15,8 +15,10 @@ const REPLACEMENTS: Array<[RegExp, string]> = [
   [/\bUS\s+Hwy\b/gi, "US Highway"],
   [/\b(?:State|St)\s+Hwy\b/gi, "State Highway"],
   [/\bRanch\s+Rd\b/gi, "Ranch Road"],
-  [/\bFM\b/gi, "Farm to Market"],
-  [/\bRM\b/gi, "Ranch to Market"],
+  // "Road" is required; see docs/decisions.md, "Texas road-name spellings".
+  [/\bFM\b(?:\s+(?:Rd|Road)\b)?/gi, "Farm to Market Road"],
+  [/\bRM\b(?:\s+(?:Rd|Road)\b)?/gi, "Ranch to Market Road"],
+  [/\bCR\b[\s-]*(?=\d)/gi, "County Road "],
   [/\bHwy\b/gi, "Highway"],
   // Standalone directionals (compounds first).
   [/\bNE\b/g, "Northeast"],

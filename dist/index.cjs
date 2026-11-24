@@ -590,8 +590,10 @@ var REPLACEMENTS = [
   [/\bUS\s+Hwy\b/gi, "US Highway"],
   [/\b(?:State|St)\s+Hwy\b/gi, "State Highway"],
   [/\bRanch\s+Rd\b/gi, "Ranch Road"],
-  [/\bFM\b/gi, "Farm to Market"],
-  [/\bRM\b/gi, "Ranch to Market"],
+  // "Road" is required; see docs/decisions.md, "Texas road-name spellings".
+  [/\bFM\b(?:\s+(?:Rd|Road)\b)?/gi, "Farm to Market Road"],
+  [/\bRM\b(?:\s+(?:Rd|Road)\b)?/gi, "Ranch to Market Road"],
+  [/\bCR\b[\s-]*(?=\d)/gi, "County Road "],
   [/\bHwy\b/gi, "Highway"],
   // Standalone directionals (compounds first).
   [/\bNE\b/g, "Northeast"],
@@ -692,14 +694,17 @@ async function reverseGeocode(apiKey, lat, lng) {
   return null;
 }
 async function googleValidates(apiKey, street1, street2, context) {
-  const s1 = normalizeRoadName(street1);
-  const s2 = normalizeRoadName(street2);
   const parts = [context?.city, context?.stateCode].filter(Boolean);
   const suffix = parts.length ? `, ${parts.join(", ")}` : "";
-  const results = await geocodeRequest(apiKey, { address: `${s1} and ${s2}${suffix}` });
-  for (const result of results) {
-    const types = result.types ?? [];
-    if (types.includes("intersection")) {
+  const addresses = [
+    `${normalizeRoadName(street1)} and ${normalizeRoadName(street2)}${suffix}`,
+    `${collapseSpaces(street1)} and ${collapseSpaces(street2)}${suffix}`
+  ];
+  for (const address of [...new Set(addresses)]) {
+    const results = await geocodeRequest(apiKey, { address });
+    for (const result of results) {
+      const types = result.types ?? [];
+      if (!types.includes("intersection")) continue;
       const info = parseAddressComponents(result);
       const streets = parseIntersectionStreets(result);
       if (streets) {
@@ -727,28 +732,31 @@ function distanceToArea(point, area) {
   }
   return best;
 }
-function buildIntersectionQuery(text, context = {}) {
+function collapseSpaces(text) {
+  return text.trim().replace(/\s+/g, " ");
+}
+function buildIntersectionQueries(text, context = {}) {
   const [streetPart, ...localityParts] = text.trim().replace(/\s+and\s+/i, " & ").split(",");
-  const streets = streetPart.split(/\s*&\s*/).map((street) => normalizeRoadName(street)).join(" & ");
+  const streets = streetPart.split(/\s*&\s*/);
   const typedLocality = localityParts.map((part) => part.trim()).filter(Boolean);
   const locality = typedLocality.length ? typedLocality : [context.city, context.stateCode].filter((part) => Boolean(part));
-  const address = [streets, ...locality].join(", ");
-  const params = {
-    address,
+  const shared = {
     components: context.stateCode ? `country:US|administrative_area:${context.stateCode}` : "country:US"
   };
   const area = context.area ?? [];
   if (area.length > 0) {
+    const lats = area.map((c) => c.lat);
+    const lngs = area.map((c) => c.lng);
     const padLat = MAX_INTERSECTION_DISTANCE_METERS / METERS_PER_DEGREE_LAT;
-    const midLat = (Math.min(...area.map((c) => c.lat)) + Math.max(...area.map((c) => c.lat))) / 2;
+    const midLat = (Math.min(...lats) + Math.max(...lats)) / 2;
     const padLng = padLat / Math.max(Math.cos(midLat * Math.PI / 180), 0.1);
-    const south = Math.min(...area.map((c) => c.lat)) - padLat;
-    const west = Math.min(...area.map((c) => c.lng)) - padLng;
-    const north = Math.max(...area.map((c) => c.lat)) + padLat;
-    const east = Math.max(...area.map((c) => c.lng)) + padLng;
-    params.bounds = `${south},${west}|${north},${east}`;
+    shared.bounds = `${Math.min(...lats) - padLat},${Math.min(...lngs) - padLng}|${Math.max(...lats) + padLat},${Math.max(...lngs) + padLng}`;
   }
-  return params;
+  const addresses = [
+    [streets.map(collapseSpaces).join(" & "), ...locality].join(", "),
+    [streets.map((street) => normalizeRoadName(street)).join(" & "), ...locality].join(", ")
+  ];
+  return [...new Set(addresses)].map((address) => ({ address, ...shared }));
 }
 function selectNearbyIntersection(results, area = []) {
   for (const result of results) {
@@ -762,8 +770,11 @@ function selectNearbyIntersection(results, area = []) {
   return null;
 }
 async function geocodeIntersection(apiKey, addressString, context) {
-  const results = await geocodeRequest(apiKey, buildIntersectionQuery(addressString, context));
-  const match = selectNearbyIntersection(results, context?.area);
+  let match = null;
+  for (const params of buildIntersectionQueries(addressString, context)) {
+    match = selectNearbyIntersection(await geocodeRequest(apiKey, params), context?.area);
+    if (match) break;
+  }
   if (!match) return null;
   const info = parseAddressComponents(match);
   if (info.lat === void 0 || info.lng === void 0) return null;

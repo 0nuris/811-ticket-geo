@@ -4,7 +4,7 @@ import {
   reverseGeocode,
   geocodeIntersection,
   computeRoute,
-  buildIntersectionQuery,
+  buildIntersectionQueries,
 } from "../../src/api/google.js";
 
 const mockFetch = vi.fn();
@@ -242,15 +242,44 @@ describe("geocodeIntersection", () => {
   });
 
   it("keeps a locality the user typed instead of the work area's city", () => {
-    const params = buildIntersectionQuery("Main St & Johnson Rd, Fort Worth", kellerContext);
-    expect(params.address).toBe("Main St & Johnson Rd, Fort Worth");
+    const [typed] = buildIntersectionQueries("Main St & Johnson Rd, Fort Worth", kellerContext);
+    expect(typed.address).toBe("Main St & Johnson Rd, Fort Worth");
   });
 
-  it("expands abbreviated road names the way Google matches intersections", () => {
-    const params = buildIntersectionQuery("FM 1171 and Co Rd 128");
-    expect(params.address).toBe("Farm to Market 1171 & County Road 128");
-    expect(params.components).toBe("country:US");
-    expect(params.bounds).toBeUndefined();
+  it("queries the text as typed, then with road names expanded", () => {
+    const queries = buildIntersectionQueries("FM 1171 and  Co Rd 128");
+    expect(queries.map((q) => q.address)).toEqual([
+      "FM 1171 & Co Rd 128",
+      "Farm to Market Road 1171 & County Road 128",
+    ]);
+    expect(queries[1].components).toBe("country:US");
+    expect(queries[1].bounds).toBeUndefined();
+  });
+
+  it("sends one query when expansion changes nothing", () => {
+    expect(buildIntersectionQueries("Main St & Johnson Rd", kellerContext)).toHaveLength(1);
+  });
+
+  // Measured 2026-11-24: "FM 488 & FM 1124" resolves only expanded, "FM 121" only as typed.
+  it("falls back to the expanded spelling when the typed one finds no intersection", async () => {
+    mockFetch
+      .mockResolvedValueOnce(geocodeResponse([{
+        formatted_address: "FM 488, Texas 75840, USA", types: ["route"], partial_match: true,
+        address_components: [], geometry: { location: { lat: 31.88, lng: -96.12 } },
+      }]))
+      .mockResolvedValueOnce(geocodeResponse([{
+        formatted_address: "FM1124 & FM488, Texas 75840, USA", types: ["intersection"],
+        address_components: [], geometry: { location: { lat: 31.8812, lng: -96.1214 } },
+      }]));
+
+    const result = await geocodeIntersection("test-key", "FM 488 & FM 1124", {
+      area: [{ lat: 31.8815, lng: -96.1214 }], city: "Fairfield", stateCode: "TX",
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(new URL(mockFetch.mock.calls[1][0] as string).searchParams.get("address"))
+      .toBe("Farm to Market Road 488 & Farm to Market Road 1124, Fairfield, TX");
+    expect(result?.name).toBe("FM1124 & FM488");
   });
 
   it("returns null when geocode fails", async () => {

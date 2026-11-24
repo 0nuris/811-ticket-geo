@@ -33,3 +33,27 @@ the Lynnwood-Pricedale stop: county, city and zip all Pennsylvania, directions a
 A person who typed street names without types (`Main & Johnson`) now gets the not-found
 error and should add the types. That is deliberate: every non-intersection result measured
 was in the wrong place.
+
+## Texas road-name spellings
+
+`normalizeRoadName` (`src/parsers/normalize.ts`) expands abbreviations before geocoding. Both
+lookups try two spellings and keep the first intersection: `googleValidates` (GeoNames names)
+tries expanded then as given; `geocodeIntersection` (typed text) tries as typed then expanded.
+
+Measured 2026-11-24 against the Geocoding API, Texas filter on:
+
+| Query | Result |
+| --- | --- |
+| `N Country Ln & Farm to Market 1141, Rockwall, TX` | `S Market St`, Dallas (route) |
+| `N Country Ln & Farm to Market Road 1141, Rockwall, TX` | `N Country Ln & FM1141` intersection |
+| `FM 488 & FM 1124, Fairfield, TX` | `FM 488` route only |
+| `Farm to Market Road 488 & Farm to Market Road 1124, Fairfield, TX` | intersection |
+| `JC Maples RD & FM 121, Gunter, TX` | intersection |
+| `JC Maples RD & Farm to Market Road 121, Gunter, TX` | `Jc Maples Rd` route only |
+| `Airport Rd & CR-309, Kaufman, TX` | route only |
+| `Airport Rd & County Road 309, Kaufman, TX` | intersection |
+
+So `FM`/`RM` expand to "... to Market Road", `CR` before a number expands to "County Road", and
+no single spelling resolves every road, which is why the lookups try both. On 60 real RPMx work
+areas this took the typed-intersection acceptance from 44 to 49 and cut `(unverified)` automatic
+names from 19 to 15, with no automatic name made worse.

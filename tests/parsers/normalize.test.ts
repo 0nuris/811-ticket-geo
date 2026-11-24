@@ -8,8 +8,13 @@ describe("normalizeRoadName", () => {
     expect(normalizeRoadName("US Hwy 87")).toBe("US Highway 87");
     expect(normalizeRoadName("St Hwy 16")).toBe("State Highway 16");
     expect(normalizeRoadName("State Hwy 16")).toBe("State Highway 16");
-    expect(normalizeRoadName("FM 2335")).toBe("Farm to Market 2335");
-    expect(normalizeRoadName("RM 620")).toBe("Ranch to Market 620");
+    expect(normalizeRoadName("FM 2335")).toBe("Farm to Market Road 2335");
+    expect(normalizeRoadName("RM 620")).toBe("Ranch to Market Road 620");
+    expect(normalizeRoadName("FM Rd 148")).toBe("Farm to Market Road 148");
+    expect(normalizeRoadName("Fm 2897 S")).toBe("Farm to Market Road 2897 South");
+    expect(normalizeRoadName("CR-309")).toBe("County Road 309");
+    expect(normalizeRoadName("Cr 134 E")).toBe("County Road 134 East");
+    expect(normalizeRoadName("Cedar Cr")).toBe("Cedar Cr");
   });
 
   it("expands a bare Hwy suffix", () => {
