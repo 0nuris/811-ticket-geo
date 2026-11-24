@@ -57,3 +57,56 @@ So `FM`/`RM` expand to "... to Market Road", `CR` before a number expands to "Co
 no single spelling resolves every road, which is why the lookups try both. On 60 real RPMx work
 areas this took the typed-intersection acceptance from 44 to 49 and cut `(unverified)` automatic
 names from 19 to 15, with no automatic name made worse.
+
+## Choosing the intersection
+
+`processSite` (`src/client.ts`) and `src/selection.ts`. Measured 2026-11-24 on 60 real RPMx work
+areas (one per site from 830 Texas 811 tickets, 2026-10-25 to 2026-11-24, 17 counties).
+
+**What the data sources do.**
+
+- GeoNames' free tier refuses a radius over 1 km ("the radius is too big for the free service,
+  max=1"). Its TIGER and OSM intersection endpoints both lack many subdivision crossings: Sandlin
+  Dr & Domingo Dr (Parker), Saratoga Dr & Basketflower Dr (Ellis) and S New Rd & Creekview Dr
+  (McLennan) are not nodes; rural Wilbarger has none within 1.5 km.
+- A Roads API snap onto a freeway makes GeoNames return only interchange nodes. At Parker the only
+  candidate was `I-20 & I-30`, a 9-mile loop on interstates.
+- A reverse-geocode result's `geometry.location` is the matched feature's point, often mid-road.
+  Measuring the off-road walk to it turned a 49 m walk into 2,763 ft (Hardeman, 495 acres).
+- Google Routes' `avoidTolls` and `avoidHighways` are preferences: a site reachable only by
+  highway still gets a route.
+- A Routes step "Head west on Aledo Rd toward Aledo Connector Rd" names the next crossing ahead.
+
+**What the code does.**
+
+- Routes up to 8 GeoNames candidates (was 3) and scores each: drive meters, plus 500 per ramp or
+  merge, 1,000 for a toll road, 300 per U-turn, 1,500 for starting at an interstate, tollway or
+  freeway crossing, plus 2x the off-road walk from where the drive stops.
+- When the best is penalized, searches again from the nearest snap on a local road.
+- When nothing is within 1 km, searches GeoNames rings at 1.5 and 3 km.
+- When the best still scores over 300, tries the junctions on its own route, nearest the site
+  first, and pairs of road names Google reports around the site, geocoded as intersections.
+- When the vertex nearest the intersection gives a penalized route or a walk over 100 m, tries
+  the next 4 vertices.
+- `Intersection.verified` replaces the "(unverified)" suffix, which had reached 11 of 41 filed
+  tickets.
+
+**Result** (same 60 sites, same Google responses):
+
+| Measure | Deployed (`a425cb5`) | This change |
+| --- | --- | --- |
+| No intersection found | 2 | 0 |
+| "(unverified)" in ticket text | 19 | 0 |
+| Interstate/tollway/freeway crossing picked | 4 | 0 |
+| Ramp, merge or exit in route | 8 | 1 |
+| Toll road / U-turn | 2 / 4 | 1 / 0 |
+| Off-road walk over 500 ft | 8 | 3 |
+| Staff's intersection is the shorter drive | 15/49 | 1/50 (by 29 m) |
+| Median / max drive | 305 m / 14.9 km | 125 m / 1.5 km |
+
+The remaining ramp and toll are one site that lies along the President George Bush Turnpike.
+The three long walks are field sites where no nearby vertex is closer to a road.
+
+**Cost.** Live, 8 of the sites: 18 to 102 API calls and 0.5 to 4.7 s per site, under the API's
+15 s geocode timeout. Probes run at most 10 at a time: a burst past Google's per-second limit
+comes back empty rather than as an error.

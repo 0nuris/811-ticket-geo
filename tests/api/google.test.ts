@@ -121,6 +121,7 @@ describe("geocodeIntersection", () => {
       state: "Texas",
       stateCode: "TX",
       zip: "75201",
+      verified: true,
     });
   });
 
@@ -227,6 +228,7 @@ describe("geocodeIntersection", () => {
       state: "Texas",
       stateCode: "TX",
       zip: "76248",
+      verified: true,
     });
   });
 
@@ -251,6 +253,7 @@ describe("geocodeIntersection", () => {
     expect(queries.map((q) => q.address)).toEqual([
       "FM 1171 & Co Rd 128",
       "Farm to Market Road 1171 & County Road 128",
+      "FM 1171 & County Road 128",
     ]);
     expect(queries[1].components).toBe("country:US");
     expect(queries[1].bounds).toBeUndefined();

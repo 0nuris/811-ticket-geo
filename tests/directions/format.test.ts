@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatDirections, formatMarkingText, formatManualDirections } from "../../src/directions/format.js";
+import { formatDirections, formatMarkingText, formatManualDirections, nameUnnamedRoad } from "../../src/directions/format.js";
 import type { Intersection, RouteResult, Coordinate } from "../../src/types.js";
 
 const intersection: Intersection = {
@@ -207,5 +207,54 @@ describe("formatMarkingText", () => {
     expect(result).toContain("WORK AREA BOUNDARIES (4 points)");
     expect(result).not.toMatch(/0 ft to 33, -97/);
     expect(toStartMatches).toHaveLength(1);
+  });
+});
+
+describe("readable ticket text", () => {
+  const precise: Coordinate = { lat: 32.943752726620374, lng: -97.25124478340149 };
+
+  it("prints the destination and polygon to 6 decimals", () => {
+    const text = formatDirections(intersection, precise, route, coords);
+    expect(text.split("\n")[0]).toMatch(/to 32\.943753, -97\.251245$/);
+    const marking = formatMarkingText([precise, ...coords]);
+    expect(marking).toContain("Start: 32.943753, -97.251245");
+    expect(marking).not.toMatch(/\d+\.\d{7,}/);
+  });
+
+  it("ends with an arrival line when there is no off-road leg", () => {
+    const lines = formatDirections(intersection, destination, route, coords).split("\n");
+    expect(lines).toContain("3. Arrive at the work area (33.005, -96.995).");
+  });
+
+  it("names the road Google leaves out", () => {
+    expect(nameUnnamedRoad("Turn left")).toBe("Turn left onto an unnamed road");
+    expect(nameUnnamedRoad("Sharp right")).toBe("Sharp right onto an unnamed road");
+    expect(nameUnnamedRoad("Head west")).toBe("Head west on an unnamed road");
+    expect(nameUnnamedRoad("Turn left onto Oak Ave")).toBe("Turn left onto Oak Ave");
+    expect(nameUnnamedRoad("Head east on Basketflower Dr toward Wheatgrass Rd")).toBe("Head east on Basketflower Dr toward Wheatgrass Rd");
+    expect(nameUnnamedRoad("Make a U-turn at Main St")).toBe("Make a U-turn at Main St");
+  });
+
+  it("keeps Google's notes after the maneuver, road and heading", () => {
+    const noted: RouteResult = {
+      ...route,
+      steps: [
+        route.steps[0],
+        {
+          navigationInstruction: { maneuver: "TURN_RIGHT", instructions: "Turn right\nRestricted usage road" },
+          localizedValues: { distance: { text: "0.1 mi" } },
+          startLocation: { latLng: { latitude: 33.003, longitude: -97.0 } },
+        },
+      ],
+    };
+    const text = formatDirections(intersection, destination, noted, coords);
+    expect(text).toMatch(/2\. Turn right onto an unnamed road heading \w+ - Restricted usage road \(0\.1 mi\)/);
+  });
+
+  it('says "off an unnamed road" rather than "off Unnamed Road"', () => {
+    const text = formatDirections(intersection, destination, route, coords, {
+      distanceFeet: 793, cardinal: "east", roadName: "Unnamed Road",
+    });
+    expect(text).toContain("Work area is about 793 ft east off an unnamed road");
   });
 });

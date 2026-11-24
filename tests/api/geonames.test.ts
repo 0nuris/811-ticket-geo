@@ -134,7 +134,8 @@ describe("findIntersectionCandidates", () => {
 
     expect(result).toHaveLength(2);
     expect(result[0].name).toBe("Elm St & 1st Ave");
-    expect(result[1].name).toBe("River Rd & Oak Ave (unverified)");
+    expect(result[1].name).toBe("River Rd & Oak Ave");
+    expect(result[1].verified).toBe(false);
   });
 
   it("returns candidates sorted with preferred road first when verified", async () => {
@@ -207,7 +208,8 @@ describe("findIntersectionCandidates", () => {
     });
 
     expect(result).toHaveLength(2);
-    expect(result[0].name).toBe("Park Avenue & Oak Ave (unverified)");
+    expect(result[0].name).toBe("Park Avenue & Oak Ave");
+    expect(result[0].verified).toBe(false);
     expect(result[1].name).toBe("Elm St & 1st Ave");
   });
 
@@ -275,7 +277,7 @@ describe("findIntersectionCandidates", () => {
     expect(validateUrl.includes("Brady")).toBe(true);
     expect(validateUrl.includes("TX")).toBe(true);
 
-    // Validated location is close to the GeoNames node, so it is accepted (no "(unverified)").
+    // Validated location is close to the GeoNames node, so it is accepted (verified).
     expect(result[0].name).toBe("US Hwy 87 & Co Rd 128");
   });
 
@@ -330,7 +332,8 @@ describe("findIntersectionCandidates", () => {
 
     const result = await findIntersectionCandidates("google-key", "geouser", 31.198, -99.495, { maxCandidates: 1 });
 
-    expect(result[0].name).toBe("Co Rd 128 & US Hwy 87 (unverified)");
+    expect(result[0].name).toBe("Co Rd 128 & US Hwy 87");
+    expect(result[0].verified).toBe(false);
     expect(result[0].lat).toBeCloseTo(31.198, 3);
     expect(result[0].lng).toBeCloseTo(-99.495, 3);
   });

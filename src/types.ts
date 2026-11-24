@@ -21,6 +21,7 @@ export interface StreetParts {
 }
 
 export interface Intersection {
+  /** Display name for the ticket; never carries a verification marker. */
   name: string;
   street1: string;
   street2: string;
@@ -31,6 +32,8 @@ export interface Intersection {
   state: string;
   stateCode: string;
   zip: string;
+  /** False when Google could not confirm the GeoNames crossing; for the UI, not the ticket. */
+  verified?: boolean;
 }
 
 export interface BoundingBox {
@@ -93,6 +96,8 @@ export interface RouteStep {
 export interface RouteResult {
   steps: RouteStep[];
   distanceMeters: number;
+  /** Where the drive stops: the road point nearest the destination. */
+  endLocation?: Coordinate;
   localizedValues?: {
     distance?: { text: string };
     duration?: { text: string };
@@ -113,4 +118,6 @@ export interface IntersectionSelectionResult {
   intersection: Intersection;
   nearestCoordinate: Coordinate;
   route: RouteResult;
+  /** selectionScore: drive + penalties + weighted off-road walk; the selection minimizes this. */
+  score: number;
 }

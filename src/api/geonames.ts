@@ -10,7 +10,7 @@ const GEONAMES_INTERSECTION_URL = "https://secure.geonames.org/findNearestInters
 // rather than relocating the intersection to the wrong place.
 const MAX_VALIDATION_DISTANCE_METERS = 750;
 
-interface GeoNamesCandidate {
+export interface GeoNamesCandidate {
   street1: string;
   street2: string;
   lat: string;
@@ -81,11 +81,12 @@ function buildResult(ix: GeoNamesCandidate, googleInfo?: GoogleInfo | null): Int
       state: googleInfo.state ?? ix.adminName1,
       stateCode: googleInfo.stateCode ?? ix.adminCode1,
       zip: googleInfo.zip ?? ix.postalcode,
+      verified: true,
     };
   }
 
   return {
-    name: `${name} (unverified)`,
+    name,
     street1: ix.street1,
     street2: ix.street2,
     lat: ixLat,
@@ -95,6 +96,7 @@ function buildResult(ix: GeoNamesCandidate, googleInfo?: GoogleInfo | null): Int
     state: ix.adminName1,
     stateCode: ix.adminCode1,
     zip: ix.postalcode,
+    verified: false,
   };
 }
 
@@ -116,20 +118,17 @@ function sortByPreferredRoad<T>(
   return [...matching, ...nonMatching];
 }
 
-export async function findIntersectionCandidates(
-  googleApiKey: string,
+/** Raw GeoNames intersection nodes near a point (free tier: radius at most 1 km). */
+export async function fetchIntersectionNodes(
   geonamesUsername: string,
-  lat: number,
-  lng: number,
-  options?: FindIntersectionOptions
-): Promise<Intersection[]> {
-  const { preferredRoad, maxCandidates = 3, radiusKm = 1.0 } = options ?? {};
-
+  point: { lat: number; lng: number },
+  options: { maxRows: number; radiusKm: number }
+): Promise<GeoNamesCandidate[]> {
   const url = new URL(GEONAMES_INTERSECTION_URL);
-  url.searchParams.set("lat", String(lat));
-  url.searchParams.set("lng", String(lng));
-  url.searchParams.set("maxRows", String(maxCandidates));
-  url.searchParams.set("radius", String(radiusKm));
+  url.searchParams.set("lat", String(point.lat));
+  url.searchParams.set("lng", String(point.lng));
+  url.searchParams.set("maxRows", String(options.maxRows));
+  url.searchParams.set("radius", String(options.radiusKm));
   url.searchParams.set("username", geonamesUsername);
 
   let data: { intersection?: GeoNamesCandidate | GeoNamesCandidate[] };
@@ -143,18 +142,37 @@ export async function findIntersectionCandidates(
 
   const raw = data.intersection;
   if (!raw) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
 
-  const candidates: GeoNamesCandidate[] = Array.isArray(raw) ? raw : [raw];
+/** Confirms each node with Google (in parallel) and names it from the best source. */
+export async function validateIntersectionNodes(
+  googleApiKey: string,
+  nodes: GeoNamesCandidate[]
+): Promise<Intersection[]> {
+  return Promise.all(
+    nodes.map(async (ix) =>
+      buildResult(
+        ix,
+        await googleValidates(googleApiKey, ix.street1, ix.street2, {
+          city: ix.placeName,
+          stateCode: ix.adminCode1,
+        })
+      )
+    )
+  );
+}
 
-  const results: Intersection[] = [];
-  for (const ix of candidates) {
-    const googleInfo = await googleValidates(googleApiKey, ix.street1, ix.street2, {
-      city: ix.placeName,
-      stateCode: ix.adminCode1,
-    });
-    results.push(buildResult(ix, googleInfo));
-  }
-
+export async function findIntersectionCandidates(
+  googleApiKey: string,
+  geonamesUsername: string,
+  lat: number,
+  lng: number,
+  options?: FindIntersectionOptions
+): Promise<Intersection[]> {
+  const { preferredRoad, maxCandidates = 3, radiusKm = 1.0 } = options ?? {};
+  const nodes = await fetchIntersectionNodes(geonamesUsername, { lat, lng }, { maxRows: maxCandidates, radiusKm });
+  const results = await validateIntersectionNodes(googleApiKey, nodes);
   return sortByPreferredRoad(results, (ix) => ix, preferredRoad);
 }
 

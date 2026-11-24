@@ -30,6 +30,29 @@ function coordinatesEqual(a: Coordinate, b: Coordinate): boolean {
   return a.lat === b.lat && a.lng === b.lng;
 }
 
+/** Trims a coordinate to ~0.1 m precision for readable step targets. */
+function roundCoordinate(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+function formatCoordinate(c: Coordinate): string {
+  return `${roundCoordinate(c.lat)}, ${roundCoordinate(c.lng)}`;
+}
+
+// Google leaves the road name out on unnamed roads, drives and parking aisles,
+// which reads as "Turn left heading north" with nothing to turn onto.
+const NAMES_A_ROAD = /\b(onto|on|toward|to stay on|via|exit|ramp|merge|destination|pass by|follow signs|u-turn)\b/i;
+const BARE_TURN = /^(Turn|Slight|Sharp|Keep|Bear)\b/i;
+const BARE_START = /^(Head|Continue)\b/i;
+
+/** Says "an unnamed road" where Google's instruction names none. */
+export function nameUnnamedRoad(instruction: string): string {
+  if (NAMES_A_ROAD.test(instruction)) return instruction;
+  if (BARE_TURN.test(instruction)) return `${instruction} onto an unnamed road`;
+  if (BARE_START.test(instruction)) return `${instruction} on an unnamed road`;
+  return instruction;
+}
+
 function normalizeLoopCoordinates(coordinates: Coordinate[]): Coordinate[] {
   if (
     coordinates.length > 1 &&
@@ -57,7 +80,7 @@ function buildDirectionsHeader(intersection: Intersection, destination: Coordina
   else if (stateCode) addressParts.push(stateCode);
   const directionsFrom = addressParts.join(", ");
 
-  return `DIRECTIONS from ${directionsFrom} to ${destination.lat}, ${destination.lng}`;
+  return `DIRECTIONS from ${directionsFrom} to ${formatCoordinate(destination)}`;
 }
 
 /**
@@ -77,7 +100,10 @@ function renderRouteSteps(route: RouteResult, destination: Coordinate): string[]
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const nav = step.navigationInstruction ?? {};
-    let instruction = (nav.instructions ?? "Continue").replace(/\n/g, " - ");
+    // Google puts notes ("Toll road", "Restricted usage road") on later lines;
+    // keep them after the maneuver, road and heading.
+    const [maneuverLine, ...notes] = (nav.instructions ?? "Continue").split("\n");
+    let instruction = nameUnnamedRoad(maneuverLine);
 
     const currentLocation = stepLocations[i];
     const nextStepLocation = i + 1 < stepLocations.length ? stepLocations[i + 1] : null;
@@ -97,6 +123,8 @@ function renderRouteSteps(route: RouteResult, destination: Coordinate): string[]
       }
     }
 
+    if (notes.length) instruction = [instruction, ...notes].join(" - ");
+
     const locVals = step.localizedValues ?? {};
     const dist = locVals.distance?.text ?? "";
     const dur = locVals.duration?.text ?? "";
@@ -111,11 +139,6 @@ function renderRouteSteps(route: RouteResult, destination: Coordinate): string[]
 function formatStepDistance(meters: number): string {
   const feet = meters * METERS_TO_FEET;
   return feet >= 1000 ? `${(feet / 5280).toFixed(1)} mi` : `${Math.round(feet)} ft`;
-}
-
-/** Trims a coordinate to ~0.1 m precision for readable step targets. */
-function roundCoordinate(value: number): number {
-  return Math.round(value * 1e6) / 1e6;
 }
 
 // A heading change beyond this many degrees (from a step's opening heading)
@@ -187,10 +210,13 @@ export function formatDirections(
   // express the final off-road leg). Spell it out so the locator knows to leave
   // the road and enter the site.
   if (finalApproach && finalApproach.distanceFeet > 0) {
-    const off = finalApproach.roadName ? ` off ${finalApproach.roadName}` : " off the roadway";
+    const road = finalApproach.roadName && !/^unnamed road$/i.test(finalApproach.roadName) ? finalApproach.roadName : null;
+    const off = road ? ` off ${road}` : finalApproach.roadName ? " off an unnamed road" : " off the roadway";
     directionsLines.push(
       `${route.steps.length + 1}. Work area is about ${finalApproach.distanceFeet} ft ${finalApproach.cardinal}${off} - leave the road and enter the site (off-road).`
     );
+  } else {
+    directionsLines.push(`${route.steps.length + 1}. Arrive at the work area (${formatCoordinate(destination)}).`);
   }
 
   directionsLines.push(...renderAreaTrailer(coordinates));
@@ -264,7 +290,7 @@ export function formatMarkingText(coordinates: Coordinate[]): string {
   ];
 
   const start = loopCoordinates[0];
-  lines.push(`Start: ${start.lat}, ${start.lng}`);
+  lines.push(`Start: ${formatCoordinate(start)}`);
 
   for (let j = 1; j <= n; j++) {
     const prev = loopCoordinates[j - 1];
@@ -272,9 +298,9 @@ export function formatMarkingText(coordinates: Coordinate[]): string {
     const { distanceMeters, bearingDegrees } = geoMeasure(prev, curr);
     const cardinal = bearingToCardinal(bearingDegrees).toUpperCase();
     const distanceFeet = Math.round(distanceMeters * METERS_TO_FEET);
-    lines.push(`    -> ${cardinal} ${distanceFeet} ft to ${curr.lat}, ${curr.lng}`);
+    lines.push(`    -> ${cardinal} ${distanceFeet} ft to ${formatCoordinate(curr)}`);
   }
 
-  lines.push(`Returns to start point (${start.lat}, ${start.lng})`);
+  lines.push(`Returns to start point (${formatCoordinate(start)})`);
   return lines.join("\n");
 }

@@ -226,9 +226,15 @@ export function buildIntersectionQueries(
     shared.bounds = `${Math.min(...lats) - padLat},${Math.min(...lngs) - padLng}|${Math.max(...lats) + padLat},${Math.max(...lngs) + padLng}`;
   }
 
+  // "Fm 2897 S & Cr 134 E" resolves only as "FM 2897 & County Road 134".
+  const dropRouteDirectional = (street: string) =>
+    street.replace(/(\d+)\s+(N|S|E|W|North|South|East|West)\.?$/i, "$1");
+  const expandCountyRoad = (street: string) =>
+    street.replace(/\b(?:CR|Co\.?\s+Rd|Cnty\.?\s+Rd)\b[\s-]*(?=\d)/gi, "County Road ");
   const addresses = [
     [streets.map(collapseSpaces).join(" & "), ...locality].join(", "),
     [streets.map((street) => normalizeRoadName(street)).join(" & "), ...locality].join(", "),
+    [streets.map((street) => expandCountyRoad(dropRouteDirectional(collapseSpaces(street)))).join(" & "), ...locality].join(", "),
   ];
   return [...new Set(addresses)].map((address) => ({ address, ...shared }));
 }
@@ -280,6 +286,7 @@ export async function geocodeIntersection(
     state: info.state ?? "",
     stateCode: info.stateCode ?? "",
     zip: info.zip ?? "",
+    verified: true,
   };
 }
 
@@ -320,6 +327,9 @@ export async function computeRoute(
     },
     travelMode: "DRIVE",
     computeAlternativeRoutes: true,
+    // A locator's last mile is surface streets; both are preferences, so a site
+    // reachable only by highway still gets a route.
+    routeModifiers: { avoidTolls: true, avoidHighways: true },
   };
 
   try {
@@ -334,6 +344,7 @@ export async function computeRoute(
           "routes.legs.localizedValues",
           "routes.legs.steps.startLocation",
           "routes.legs.startLocation",
+          "routes.legs.endLocation",
           "routes.distanceMeters",
         ].join(","),
       },
@@ -352,10 +363,12 @@ export async function computeRoute(
     const chosen = noUturn.length > 0 ? noUturn[0] : routes[0];
 
     const leg = chosen.legs[0];
+    const end = (leg as { endLocation?: { latLng?: { latitude: number; longitude: number } } }).endLocation?.latLng;
     return {
       steps: leg.steps as unknown as RouteResult["steps"],
       distanceMeters: chosen.distanceMeters,
       localizedValues: leg.localizedValues as RouteResult["localizedValues"],
+      ...(end ? { endLocation: { lat: end.latitude, lng: end.longitude } } : {}),
     };
   } catch {
     return null;

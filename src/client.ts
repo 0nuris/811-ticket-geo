@@ -21,7 +21,21 @@ import {
 import {
   findNearestIntersection as apiFindNearestIntersection,
   findIntersectionCandidates as apiFindIntersectionCandidates,
+  fetchIntersectionNodes,
+  validateIntersectionNodes,
+  type GeoNamesCandidate,
 } from "./api/geonames.js";
+import { distanceToArea } from "./api/google.js";
+import {
+  isLimitedAccessRoad,
+  offRoadMeters,
+  pointBeyond,
+  ringPoints,
+  roadNamePairs,
+  routeJunctions,
+  routePenaltyMeters,
+  selectionScore,
+} from "./selection.js";
 import { geoMeasure, bearingToCardinal } from "./geo/measure.js";
 import { formatDirections, formatMarkingText } from "./directions/format.js";
 import { polygonAreaAcres, boundingBoxFeet } from "./geo/area.js";
@@ -101,6 +115,60 @@ function polygonCentroid(coordinates: Coordinate[]): Coordinate {
     lng += coordinate.lng;
   }
   return { lat: lat / count, lng: lng / count };
+}
+
+// All candidates are routed, so this is the API-cost knob: 3 missed a shorter
+// drive at a quarter of 60 measured sites (docs/decisions.md, "Choosing the intersection").
+const DEFAULT_MAX_CANDIDATES = 8;
+const RING_RADII_KM = [1.5, 3];
+const RING_POINTS = 8;
+// Every pair among the 8 nearest road names.
+const MAX_ROAD_NAME_PAIRS = 28;
+// GeoNames lacks many subdivision crossings; past this score, also ask Google
+// about pairs of the site's own roads (docs/decisions.md, "Choosing the intersection").
+const ROAD_NAME_SEARCH_ABOVE_METERS = 300;
+// Try other arrival vertices when the drive is penalized or ends this far from the vertex.
+const ARRIVAL_RETRY_OFFROAD_METERS = 100;
+const ARRIVAL_ALTERNATIVES = 4;
+// A route junction counts as that crossing only if the geocoded pair is this close.
+const JUNCTION_MATCH_METERS = 150;
+const ROUTE_JUNCTIONS_TRIED = 3;
+const JUNCTION_WALK_ROUNDS = 3;
+const MAX_PROBE_VERTICES = 8;
+// Bursts past Google's per-second limit come back empty, not as errors.
+const PROBE_CONCURRENCY = 10;
+
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) {
+        const i = next++;
+        out[i] = await fn(items[i]);
+      }
+    })
+  );
+  return out;
+}
+
+function dedupeCoordinates(coordinates: Coordinate[]): Coordinate[] {
+  const seen = new Set<string>();
+  return coordinates.filter((c) => {
+    const key = coordinateKey(c);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function betterSelection(
+  a: IntersectionSelectionResult | null,
+  b: IntersectionSelectionResult | null
+): IntersectionSelectionResult | null {
+  if (!a) return b;
+  if (!b) return a;
+  return b.score < a.score ? b : a;
 }
 
 function coordinateKey(coordinate: Coordinate): string {
@@ -247,47 +315,209 @@ export class TicketGeoClient {
       snappedPoint.lng,
       {
         preferredRoad,
-        maxCandidates: options?.maxCandidates,
+        maxCandidates: options?.maxCandidates ?? DEFAULT_MAX_CANDIDATES,
         radiusKm: options?.radiusKm,
       }
     );
 
-    const toRoute: Array<{
-      candidate: Intersection;
-      nearest: { coordinate: Coordinate; distanceMeters: number };
-    }> = [];
+    return this.routeCandidates(coordinates, candidates);
+  }
 
-    for (const candidate of candidates) {
-      const nearest = nearestCoordinateToTarget(coordinates, candidate);
-      if (!nearest) continue;
-      toRoute.push({ candidate, nearest });
-    }
-
-    let bestResult: IntersectionSelectionResult | null = null;
-    let bestLinearDistance = Infinity;
-
-    for (const { candidate, nearest } of toRoute) {
-      const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
-      const route = await this.computeRoute(candidate, nearest.coordinate, heading);
-      if (!route) continue;
-
-      const isBetterRoute = !bestResult || route.distanceMeters < bestResult.route.distanceMeters;
-      const isSameRouteButNearer =
-        !!bestResult &&
-        Math.abs(route.distanceMeters - bestResult.route.distanceMeters) < 10 &&
-        nearest.distanceMeters < bestLinearDistance;
-
-      if (isBetterRoute || isSameRouteButNearer) {
-        bestResult = {
-          intersection: candidate,
-          nearestCoordinate: nearest.coordinate,
-          route,
+  /**
+   * Routes every candidate to its nearest work-area vertex (in parallel) and
+   * keeps the lowest score: drive length plus routePenaltyMeters. Within 10 m of
+   * each other, the linearly nearer candidate wins.
+   */
+  async routeCandidates(
+    coordinates: Coordinate[],
+    candidates: Intersection[]
+  ): Promise<IntersectionSelectionResult | null> {
+    const routed = await Promise.all(
+      candidates.map(async (candidate) => {
+        const nearest = nearestCoordinateToTarget(coordinates, candidate);
+        if (!nearest) return null;
+        const { bearingDegrees: heading } = geoMeasure(candidate, nearest.coordinate);
+        const route = await this.computeRoute(candidate, nearest.coordinate, heading);
+        if (!route) return null;
+        return {
+          result: {
+            intersection: candidate,
+            nearestCoordinate: nearest.coordinate,
+            route,
+            score: selectionScore(route, candidate, nearest.coordinate),
+          },
+          linear: nearest.distanceMeters,
         };
-        bestLinearDistance = nearest.distanceMeters;
+      })
+    );
+
+    let best: { result: IntersectionSelectionResult; linear: number } | null = null;
+    for (const entry of routed) {
+      if (!entry) continue;
+      const better = !best || entry.result.score < best.result.score - 10;
+      const tiedButNearer =
+        !!best && Math.abs(entry.result.score - best.result.score) <= 10 && entry.linear < best.linear;
+      if (better || tiedButNearer) best = entry;
+    }
+    return best ? this.refineArrival(coordinates, best.result) : null;
+  }
+
+  /**
+   * The vertex nearest the intersection can sit beside a freeway or deep in a
+   * field. When the drive there is penalized or ends far off-road, route to the
+   * next-nearest vertices too and keep the lowest score.
+   */
+  async refineArrival(
+    coordinates: Coordinate[],
+    selected: IntersectionSelectionResult
+  ): Promise<IntersectionSelectionResult> {
+    const { intersection, route, nearestCoordinate } = selected;
+    const needsRetry =
+      routePenaltyMeters(route, intersection) > 0 ||
+      offRoadMeters(route, nearestCoordinate) > ARRIVAL_RETRY_OFFROAD_METERS;
+    if (!needsRetry) return selected;
+
+    const seen = new Set<string>([coordinateKey(nearestCoordinate)]);
+    const alternatives = [...coordinates]
+      .sort((a, b) => geoMeasure(intersection, a).distanceMeters - geoMeasure(intersection, b).distanceMeters)
+      .filter((c) => {
+        const key = coordinateKey(c);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, ARRIVAL_ALTERNATIVES);
+
+    const tried = await Promise.all(
+      alternatives.map(async (vertex) => {
+        const r = await this.computeRoute(intersection, vertex, geoMeasure(intersection, vertex).bearingDegrees);
+        return r ? { intersection, nearestCoordinate: vertex, route: r, score: selectionScore(r, intersection, vertex) } : null;
+      })
+    );
+    return tried.reduce<IntersectionSelectionResult>((best, t) => (t && t.score < best.score ? t : best), selected);
+  }
+
+  /**
+   * The nearest snapped vertex on a local road other than `primaryStreet`. A
+   * freeway snap finds only interchanges; this gives the search a second origin.
+   */
+  private async localRoadOrigin(
+    coordinates: Coordinate[],
+    snappedPoints: SnappedPoint[],
+    primaryStreet: string | null
+  ): Promise<{ location: Coordinate; street: string } | null> {
+    const bySnapDistance = [...snappedPoints].sort(
+      (a, b) =>
+        geoMeasure(coordinates[a.originalIndex], a.location).distanceMeters -
+        geoMeasure(coordinates[b.originalIndex], b.location).distanceMeters
+    );
+    const tried = new Set<string>();
+    for (const sp of bySnapDistance) {
+      const key = coordinateKey(sp.location);
+      if (tried.has(key)) continue;
+      tried.add(key);
+      if (tried.size > 4) break;
+      const street = (await this.reverseGeocode(sp.location.lat, sp.location.lng))?.street;
+      if (street && street !== primaryStreet && !isLimitedAccessRoad(street)) {
+        return { location: sp.location, street };
       }
     }
+    return null;
+  }
 
-    return bestResult;
+  /**
+   * The chosen route already passes crossings nearer the site; start there, and
+   * repeat from each improvement (each walks further down the route).
+   */
+  private async walkRouteJunctions(
+    coordinates: Coordinate[],
+    selected: IntersectionSelectionResult | null,
+    locality: { city?: string; stateCode?: string }
+  ): Promise<IntersectionSelectionResult | null> {
+    let current = selected;
+    for (let round = 0; round < JUNCTION_WALK_ROUNDS; round++) {
+      if (!current || current.score <= ROAD_NAME_SEARCH_ABOVE_METERS) break;
+      const next = betterSelection(
+        current,
+        await this.routeCandidates(coordinates, await this.routeJunctionCandidates(coordinates, current, locality))
+      );
+      if (next === current) break;
+      current = next;
+    }
+    return current;
+  }
+
+  /** The last few junctions on `selected`'s route, confirmed by geocoding their road pair. */
+  private async routeJunctionCandidates(
+    coordinates: Coordinate[],
+    selected: IntersectionSelectionResult,
+    locality: { city?: string; stateCode?: string }
+  ): Promise<Intersection[]> {
+    const junctions = routeJunctions(selected.route).slice(0, ROUTE_JUNCTIONS_TRIED);
+    const found = await Promise.all(
+      junctions.map(async ({ roads, at }) => {
+        const ix = await this.geocodeIntersection(`${roads[0]} & ${roads[1]}`, {
+          area: coordinates,
+          city: locality.city,
+          stateCode: locality.stateCode,
+        });
+        if (!ix) return null;
+        return !at || geoMeasure(ix, at).distanceMeters <= JUNCTION_MATCH_METERS ? ix : null;
+      })
+    );
+    return found.filter((ix): ix is Intersection => ix !== null);
+  }
+
+  /** GeoNames nodes on rings past its 1 km search cap, the nearest few validated. */
+  private async ringCandidates(coordinates: Coordinate[]): Promise<Intersection[]> {
+    const center = polygonCentroid(coordinates);
+    for (const radiusKm of RING_RADII_KM) {
+      const nodes = new Map<string, GeoNamesCandidate>();
+      for (const point of ringPoints(center, radiusKm, RING_POINTS)) {
+        for (const node of await fetchIntersectionNodes(this.geonamesUsername, point, { maxRows: 3, radiusKm: 1 })) {
+          nodes.set(`${node.street1}|${node.street2}`.toLowerCase(), node);
+        }
+      }
+      if (nodes.size === 0) continue;
+      const nearest = [...nodes.values()]
+        .map((node) => ({ node, d: distanceToArea({ lat: parseFloat(node.lat), lng: parseFloat(node.lng) }, coordinates) }))
+        .sort((a, b) => a.d - b.d)
+        .slice(0, DEFAULT_MAX_CANDIDATES)
+        .map((x) => x.node);
+      return validateIntersectionNodes(this.googleApiKey, nearest);
+    }
+    return [];
+  }
+
+  /**
+   * Last resort where GeoNames has no data: collect the road names Google knows
+   * around the site and geocode each pair as an intersection.
+   */
+  private async roadNamePairCandidates(
+    coordinates: Coordinate[],
+    snappedPoints: SnappedPoint[],
+    locality: { city?: string; stateCode?: string }
+  ): Promise<Intersection[]> {
+    const center = polygonCentroid(coordinates);
+    const vertices = dedupeCoordinates(coordinates).slice(0, MAX_PROBE_VERTICES);
+    // Nearest first, so the pair cap keeps the likeliest crossings: the site's own
+    // roads, then just outside each corner (where cross streets meet them), then a ring.
+    const probes = [
+      ...dedupeCoordinates(snappedPoints.map((sp) => sp.location)).slice(0, MAX_PROBE_VERTICES),
+      ...vertices,
+      ...vertices.map((v) => pointBeyond(center, v, 75)),
+      ...vertices.map((v) => pointBeyond(center, v, 250)),
+      ...ringPoints(center, 0.75, RING_POINTS),
+    ];
+    const roads = await mapLimit(probes, PROBE_CONCURRENCY, (p) => this.reverseGeocode(p.lat, p.lng));
+    const names = roads.map((r) => r?.street ?? "").filter(Boolean);
+    const pairs = roadNamePairs(names, MAX_ROAD_NAME_PAIRS);
+    const found = await mapLimit(pairs, PROBE_CONCURRENCY, ([a, b]) =>
+      this.geocodeIntersection(`${a} & ${b}`, { area: coordinates, city: locality.city, stateCode: locality.stateCode })
+    );
+    const unique = new Map<string, Intersection>();
+    for (const ix of found) if (ix) unique.set(`${ix.lat.toFixed(5)},${ix.lng.toFixed(5)}`, ix);
+    return [...unique.values()];
   }
 
   async processSite(
@@ -383,28 +613,62 @@ export class TicketGeoClient {
       const { bearingDegrees: heading } = geoMeasure(intersection, startCoordinate);
       routeResult = await this.computeRoute(intersection, startCoordinate, heading);
       if (!routeResult) throw new Error("Could not compute route from intersection to site");
+      const refined = await this.refineArrival(coordinates, {
+        intersection,
+        nearestCoordinate: startCoordinate,
+        route: routeResult,
+        score: selectionScore(routeResult, intersection, startCoordinate),
+      });
+      startCoordinate = refined.nearestCoordinate;
+      routeResult = refined.route;
     } else {
       let selected = await this.selectShortestRouteIntersection(coordinates, {
         snappedPoint: bestSnapped,
         preferredRoad: snapStreet ?? undefined,
       });
 
+      // Penalized means interchange, ramp, toll or U-turn: often a freeway snap
+      // that found only interchanges. Search again from the nearest local road.
+      if (!selected || routePenaltyMeters(selected.route, selected.intersection) > 0) {
+        const local = await this.localRoadOrigin(coordinates, snappedPoints, snapStreet);
+        if (local) {
+          selected = betterSelection(
+            selected,
+            await this.selectShortestRouteIntersection(coordinates, {
+              snappedPoint: local.location,
+              preferredRoad: local.street,
+            })
+          );
+        }
+      }
+
       // Lazy fallback: the tightest-snap point can land on an interior street
       // that has no mapped intersection within range (new subdivisions), while
-      // the work area's bounding roads do. Only when the primary search comes
-      // back empty, retry from the bounding-box extreme vertices and keep the
-      // shortest routed result. Working sites never reach this path.
+      // the work area's bounding roads do. Working sites never reach this path.
       if (!selected) {
-        let bestRouteMeters = Infinity;
         for (const origin of boundingBoxExtremeOrigins(coordinates, snappedPoints, bestSnapped)) {
-          const candidate = await this.selectShortestRouteIntersection(coordinates, {
-            snappedPoint: origin,
-          });
-          if (candidate && candidate.route.distanceMeters < bestRouteMeters) {
-            selected = candidate;
-            bestRouteMeters = candidate.route.distanceMeters;
-          }
+          selected = betterSelection(
+            selected,
+            await this.selectShortestRouteIntersection(coordinates, { snappedPoint: origin })
+          );
         }
+      }
+
+      if (!selected) {
+        selected = await this.routeCandidates(coordinates, await this.ringCandidates(coordinates));
+      }
+      const locality = { city: snapRoadInfo?.city, stateCode: snapRoadInfo?.stateCode };
+      selected = await this.walkRouteJunctions(coordinates, selected, locality);
+
+      if (!selected || selected.score > ROAD_NAME_SEARCH_ABOVE_METERS) {
+        selected = betterSelection(
+          selected,
+          await this.routeCandidates(
+            coordinates,
+            await this.roadNamePairCandidates(coordinates, snappedPoints, locality)
+          )
+        );
+        selected = await this.walkRouteJunctions(coordinates, selected, locality);
       }
 
       if (!selected) throw new Error("No nearby intersection could be determined automatically; provide a nearby intersection manually");
@@ -439,18 +703,22 @@ export class TicketGeoClient {
     // Compute the off-road final approach: how far the arrival boundary point
     // sits from the nearest road. A driving route ends at the road, so this is
     // the only place the "leave the road and enter the site" leg is captured.
+    // Measured from where the drive stops. A reverse-geocode result's location is
+    // the matched feature's point (often mid-road), which overstated a 160 ft walk
+    // as 2,763 ft on a 495-acre site.
     let finalApproach: { distanceFeet: number; cardinal: string; roadName?: string } | undefined;
-    const arrivalRoad = await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
-    if (arrivalRoad) {
-      const { distanceMeters, bearingDegrees } = geoMeasure(
-        { lat: arrivalRoad.lat, lng: arrivalRoad.lng },
-        startCoordinate
-      );
+    const driveEnd = routeResult.endLocation;
+    const arrivalRoad = driveEnd
+      ? await this.reverseGeocode(driveEnd.lat, driveEnd.lng)
+      : await this.reverseGeocode(startCoordinate.lat, startCoordinate.lng);
+    const roadPoint = driveEnd ?? (arrivalRoad ? { lat: arrivalRoad.lat, lng: arrivalRoad.lng } : null);
+    if (roadPoint) {
+      const { distanceMeters, bearingDegrees } = geoMeasure(roadPoint, startCoordinate);
       if (distanceMeters > 30) {
         finalApproach = {
           distanceFeet: Math.round(distanceMeters * 3.28084),
           cardinal: bearingToCardinal(bearingDegrees),
-          roadName: arrivalRoad.street,
+          roadName: arrivalRoad?.street,
         };
       }
     }

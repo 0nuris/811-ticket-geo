@@ -483,7 +483,8 @@ describe("TicketGeoClient.selectShortestRouteIntersection", () => {
 
     expect(computeRoute).toHaveBeenCalledTimes(2);
     expect(result).not.toBeNull();
-    expect(result!.intersection.name).toBe("East St & Oak Ave (unverified)");
+    expect(result!.intersection.name).toBe("East St & Oak Ave");
+    expect(result!.intersection.verified).toBe(false);
     expect(result!.nearestCoordinate).toEqual({ lat: 33.0, lng: -96.999 });
     expect(result!.route.distanceMeters).toBe(80);
   });
@@ -838,11 +839,13 @@ describe("TicketGeoClient.processSite", () => {
       intersection: { ...intersection, name: "West Gate & Frontage" },
       nearestCoordinate: { lat: 33.01, lng: -97.0 },
       route: { ...finalRoute, distanceMeters: 500 },
+      score: 500,
     };
     const eastResult = {
       intersection: { ...intersection, name: "East Gate & Frontage" },
       nearestCoordinate: { lat: 33.01, lng: -96.97 },
       route: { ...finalRoute, distanceMeters: 200 },
+      score: 200,
     };
 
     const select = vi
@@ -894,5 +897,114 @@ describe("TicketGeoClient.processSite", () => {
     expect(result.directionsText).toContain("Work area is about");
     expect(result.directionsText).toContain("off W Dove Rd");
     expect(result.directionsText).toContain("enter the site (off-road)");
+  });
+});
+
+describe("TicketGeoClient intersection choice (measured on 60 RPMx sites)", () => {
+  const square: Coordinate[] = [
+    { lat: 33.0, lng: -97.0 },
+    { lat: 33.001, lng: -97.0 },
+    { lat: 33.001, lng: -96.999 },
+    { lat: 33.0, lng: -96.999 },
+  ];
+  const base: Intersection = {
+    name: "Main St & Oak Ave", street1: "Main St", street2: "Oak Ave", lat: 33.0015, lng: -97.0005,
+    county: "Tarrant", city: "Fort Worth", state: "Texas", stateCode: "TX", zip: "76101",
+  };
+  const road = (street: string, lat = 33.0, lng = -97.0) => ({
+    street, city: "Fort Worth", county: "Tarrant", state: "Texas", stateCode: "TX", zip: "76101", lat, lng,
+  });
+  function route(distanceMeters: number, maneuvers: string[] = ["DEPART"], endLocation?: Coordinate): RouteResult {
+    return {
+      distanceMeters,
+      steps: maneuvers.map((m) => ({
+        navigationInstruction: { maneuver: m, instructions: m === "DEPART" ? "Head south on Main St" : "Take the ramp" },
+        localizedValues: { distance: { text: "0.1 mi" } },
+        startLocation: { latLng: { latitude: 33.0015, longitude: -97.0005 } },
+      })),
+      ...(endLocation ? { endLocation } : {}),
+    };
+  }
+  const newClient = () => new TicketGeoClient({ googleMapsApiKey: "k", geonamesUsername: "u" });
+
+  it("prefers a clean drive over a shorter one with a ramp", async () => {
+    const client = newClient();
+    const ramp = { ...base, name: "Eldorado Pkwy & Dallas Pkwy", street1: "Eldorado Pkwy", street2: "Dallas Pkwy" };
+    const clean = { ...base, name: "Newton Dr & Woodsboro Way", lat: 33.0012 };
+    vi.spyOn(client, "computeRoute").mockImplementation(async (from) =>
+      from === ramp ? route(300, ["DEPART", "RAMP_LEFT"]) : route(600)
+    );
+    const result = await client.routeCandidates(square, [ramp, clean]);
+    expect(result!.intersection.name).toBe("Newton Dr & Woodsboro Way");
+    expect(result!.score).toBe(600);
+  });
+
+  it("routes to another vertex when the nearest one ends far off-road", async () => {
+    const client = newClient();
+    const far = { lat: 33.0037, lng: -97.0 }; // ~300 m from the nearest vertex
+    vi.spyOn(client, "computeRoute").mockImplementation(async (_from, to) =>
+      to.lat === 33.001 && to.lng === -97.0 ? route(120, ["DEPART"], far) : route(500, ["DEPART"], to)
+    );
+    const result = await client.routeCandidates(square, [base]);
+    expect(result!.nearestCoordinate).not.toEqual({ lat: 33.001, lng: -97.0 });
+    expect(result!.score).toBe(500);
+  });
+
+  it("measures the off-road walk from where the drive stops, not the reverse-geocode point", async () => {
+    // Ticket 2681952067 (Hardeman): the vertex is 49 m from the road, but the
+    // reverse-geocode result sat mid-road ~840 m away and printed 2,763 ft.
+    const client = newClient();
+    const vertex = { lat: 33.001, lng: -96.999 };
+    const driveEnd = { lat: 33.00056, lng: -96.999 }; // ~49 m south of the vertex
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([{ location: driveEnd, originalIndex: 2 }]);
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue(road("4 Corners Rd", 32.9935, -96.999));
+    vi.spyOn(client, "selectShortestRouteIntersection").mockResolvedValue({
+      intersection: base, nearestCoordinate: vertex, route: route(760, ["DEPART"], driveEnd), score: 860,
+    });
+    vi.spyOn(client, "computeRoute").mockResolvedValue(null);
+    const result = await client.processSite(square);
+    expect(result.directionsText).toMatch(/Work area is about 16\d ft north off 4 Corners Rd/);
+  });
+
+  it("searches again from a local road when the freeway snap finds only interchanges", async () => {
+    // Ticket 2681951640 (Parker): the I-20 snap found only "I-20 & I-30" (a 9-mile
+    // loop); a vertex 5 m from Domingo Drive leads to the local crossing.
+    const client = newClient();
+    const freewaySnap = { lat: 33.0, lng: -97.0 };
+    const localSnap = { lat: 33.00104, lng: -97.0 };
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([
+      { location: freewaySnap, originalIndex: 0 },
+      { location: localSnap, originalIndex: 1 },
+    ]);
+    vi.spyOn(client, "reverseGeocode").mockImplementation(async (lat) =>
+      lat === localSnap.lat ? road("Domingo Drive", lat) : road("West Freeway", lat)
+    );
+    const interchange = { ...base, name: "I-20 & I-30", street1: "I-20", street2: "I-30" };
+    const localIx = { ...base, name: "Theodora Ln & Rozana St", street1: "Theodora Ln", street2: "Rozana St" };
+    const select = vi.spyOn(client, "selectShortestRouteIntersection").mockImplementation(async (_c, opts) =>
+      opts?.snappedPoint === localSnap
+        ? { intersection: localIx, nearestCoordinate: square[1], route: route(56), score: 56 }
+        : { intersection: interchange, nearestCoordinate: square[0], route: route(14876, ["DEPART", "RAMP_RIGHT"]), score: 17876 }
+    );
+    vi.spyOn(client, "computeRoute").mockResolvedValue(null);
+    const result = await client.processSite(square);
+    expect(result.intersection.name).toBe("Theodora Ln & Rozana St");
+    expect(select).toHaveBeenCalledWith(square, { snappedPoint: localSnap, preferredRoad: "Domingo Drive" });
+  });
+
+  it("tries GeoNames rings, then pairs of nearby road names, when nothing is found within 1 km", async () => {
+    // Tickets 2682326273 (Tarrant) and 2681951782 (Wilbarger) found nothing in production.
+    const client = newClient();
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([{ location: { lat: 33.0, lng: -97.0 }, originalIndex: 0 }]);
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue(road("Aledo Road"));
+    vi.spyOn(client, "selectShortestRouteIntersection").mockResolvedValue(null);
+    const order: string[] = [];
+    const paired = { ...base, name: "Aledo Rd & Aledo Connector Rd" };
+    vi.spyOn(client as never, "ringCandidates").mockImplementation((async () => { order.push("ring"); return []; }) as never);
+    vi.spyOn(client as never, "roadNamePairCandidates").mockImplementation((async () => { order.push("pairs"); return [paired]; }) as never);
+    vi.spyOn(client, "computeRoute").mockResolvedValue(route(91));
+    const result = await client.processSite(square);
+    expect(order).toEqual(["ring", "pairs"]);
+    expect(result.intersection.name).toBe("Aledo Rd & Aledo Connector Rd");
   });
 });

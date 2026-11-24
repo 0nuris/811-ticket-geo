@@ -17,6 +17,7 @@ interface StreetParts {
     suffix: string;
 }
 interface Intersection {
+    /** Display name for the ticket; never carries a verification marker. */
     name: string;
     street1: string;
     street2: string;
@@ -27,6 +28,8 @@ interface Intersection {
     state: string;
     stateCode: string;
     zip: string;
+    /** False when Google could not confirm the GeoNames crossing; for the UI, not the ticket. */
+    verified?: boolean;
 }
 interface BoundingBox {
     northSouthFeet: number;
@@ -88,6 +91,8 @@ interface RouteStep {
 interface RouteResult {
     steps: RouteStep[];
     distanceMeters: number;
+    /** Where the drive stops: the road point nearest the destination. */
+    endLocation?: Coordinate;
     localizedValues?: {
         distance?: {
             text: string;
@@ -109,6 +114,8 @@ interface IntersectionSelectionResult {
     intersection: Intersection;
     nearestCoordinate: Coordinate;
     route: RouteResult;
+    /** selectionScore: drive + penalties + weighted off-road walk; the selection minimizes this. */
+    score: number;
 }
 
 declare function geoMeasure(from: Coordinate, to: Coordinate): GeoMeasurement;
@@ -181,6 +188,37 @@ declare class TicketGeoClient {
      * tests/client.test.ts.
      */
     selectShortestRouteIntersection(coordinates: Coordinate[], options?: SelectIntersectionOptions): Promise<IntersectionSelectionResult | null>;
+    /**
+     * Routes every candidate to its nearest work-area vertex (in parallel) and
+     * keeps the lowest score: drive length plus routePenaltyMeters. Within 10 m of
+     * each other, the linearly nearer candidate wins.
+     */
+    routeCandidates(coordinates: Coordinate[], candidates: Intersection[]): Promise<IntersectionSelectionResult | null>;
+    /**
+     * The vertex nearest the intersection can sit beside a freeway or deep in a
+     * field. When the drive there is penalized or ends far off-road, route to the
+     * next-nearest vertices too and keep the lowest score.
+     */
+    refineArrival(coordinates: Coordinate[], selected: IntersectionSelectionResult): Promise<IntersectionSelectionResult>;
+    /**
+     * The nearest snapped vertex on a local road other than `primaryStreet`. A
+     * freeway snap finds only interchanges; this gives the search a second origin.
+     */
+    private localRoadOrigin;
+    /**
+     * The chosen route already passes crossings nearer the site; start there, and
+     * repeat from each improvement (each walks further down the route).
+     */
+    private walkRouteJunctions;
+    /** The last few junctions on `selected`'s route, confirmed by geocoding their road pair. */
+    private routeJunctionCandidates;
+    /** GeoNames nodes on rings past its 1 km search cap, the nearest few validated. */
+    private ringCandidates;
+    /**
+     * Last resort where GeoNames has no data: collect the road names Google knows
+     * around the site and geocode each pair as an intersection.
+     */
+    private roadNamePairCandidates;
     processSite(coordinates: Coordinate[], options?: ProcessSiteOptions): Promise<SiteResult>;
 }
 
