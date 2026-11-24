@@ -153,6 +153,17 @@ needed):
 - Skipping the Roads call for a typed intersection (its snap only picks where to read the
   locality; the polygon centroid works): 60 fewer Roads calls on 60 typed runs, the same
   intersection and acceptance on all 60, but 2 texts change (a header city, a 16 ft route).
+- Reverse geocoding filtered to `result_type=intersection`, as a one-call nearest crossing:
+  `ZERO_RESULTS` at 12 of 12 sites. Google documents the type as "a major intersection, usually
+  of two major roads", and the filter as a post-filter.
+- Naming the pair-search probes from Roads `nearestRoads` place IDs (one call for all probes,
+  then a geocode per distinct road segment) instead of a reverse geocode per probe: on the 22
+  sites that run the pair search, 391 calls instead of 643, but 103 names instead of 163, and
+  only 78 of the current names. Roads only snaps probes near a road, and a road is many segments.
+- No Google API returns intersections or cross streets for a point (docs read 2026-11-24):
+  Places lists `intersection` as a response-only type and costs $32 per 1,000; Route Matrix has
+  no steps or end point and bills each element like a route; v4 SearchDestinations navigation
+  points describe addressed places; address descriptors are experimental outside India.
 - OpenStreetMap through the public Overpass API, to compute crossings instead of pairing
   names: it had Creekview Dr & S New Rd, which GeoNames lacks, but answered in 33 to 43 s or
   with 502s, against the API's 15 s timeout. Rural Wilbarger roads carry numbers, not names.
