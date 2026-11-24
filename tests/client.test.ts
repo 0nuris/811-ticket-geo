@@ -66,6 +66,34 @@ describe("TicketGeoClient.reverseGeocode", () => {
   });
 });
 
+describe("TicketGeoClient.locateWorkArea", () => {
+  it("reverse-geocodes the polygon's centroid once", async () => {
+    const client = new TicketGeoClient({ googleMapsApiKey: "test-key", geonamesUsername: "test-user" });
+    const reverse = vi.spyOn(client, "reverseGeocode").mockResolvedValue({ street: "Main St", containingCounty: "Collin County", lat: 33.0005, lng: -96.9995 });
+    const square = [
+      { lat: 33.0, lng: -97.0 },
+      { lat: 33.001, lng: -97.0 },
+      { lat: 33.001, lng: -96.999 },
+      { lat: 33.0, lng: -96.999 },
+    ];
+
+    const result = await client.locateWorkArea(square);
+
+    expect(reverse).toHaveBeenCalledTimes(1);
+    const [lat, lng] = reverse.mock.calls[0];
+    expect(lat).toBeCloseTo(33.0005, 6);
+    expect(lng).toBeCloseTo(-96.9995, 6);
+    expect(result?.containingCounty).toBe("Collin County");
+  });
+
+  it("returns null for an empty polygon without a request", async () => {
+    const client = new TicketGeoClient({ googleMapsApiKey: "test-key", geonamesUsername: "test-user" });
+    const reverse = vi.spyOn(client, "reverseGeocode");
+    expect(await client.locateWorkArea([])).toBeNull();
+    expect(reverse).not.toHaveBeenCalled();
+  });
+});
+
 describe("TicketGeoClient.geocodeIntersection", () => {
   it("delegates to Google Geocoding API", async () => {
     mockFetch.mockResolvedValueOnce({
@@ -604,6 +632,38 @@ describe("TicketGeoClient.processSite", () => {
       { lat: 33.001, lng: -96.999 },
       expect.any(Number)
     );
+  });
+
+  it("gives the ticket the work area's county while the directions start from the intersection's city", async () => {
+    const client = new TicketGeoClient({
+      googleMapsApiKey: "test-key",
+      geonamesUsername: "test-user",
+    });
+
+    vi.spyOn(client, "findNearestRoadPoint").mockResolvedValue([
+      { location: { lat: 33.0, lng: -97.0 }, originalIndex: 0 },
+    ]);
+    vi.spyOn(client, "reverseGeocode").mockResolvedValue({
+      street: "Telecom Pkwy",
+      city: "Richardson",
+      county: "Collin County",
+      containingCounty: "Collin County",
+      containingCity: "Richardson",
+      state: "Texas",
+      stateCode: "TX",
+      zip: "75082",
+      lat: 33.0,
+      lng: -97.0,
+    });
+    const acrossTheLine = { ...intersection, county: "Dallas County", city: "Garland" };
+    vi.spyOn(client, "geocodeIntersection").mockResolvedValue(acrossTheLine);
+    vi.spyOn(client, "computeRoute").mockResolvedValue(finalRoute);
+
+    const result = await client.processSite(coordinates, { intersectionOverride: acrossTheLine.name });
+
+    expect(result.workLocality).toMatchObject({ county: "Collin County", city: "Richardson", zip: "75082" });
+    expect(result.intersection.county).toBe("Dallas County");
+    expect(result.directionsText).toContain("Main St & Oak Ave, Garland, TX");
   });
 
   it("throws when processSite receives empty coordinates with an intersection override", async () => {

@@ -41,9 +41,20 @@ export interface BoundingBox {
   eastWestFeet: number;
 }
 
+/** Where the work is, for the ticket's county, place and zip fields. */
+export interface WorkLocality {
+  county: string;
+  city: string;
+  state: string;
+  stateCode: string;
+  zip: string;
+}
+
 export interface SiteResult {
   coordinates: Coordinate[];
   intersection: Intersection;
+  /** The work area's own county and city; the intersection's can differ near a line. */
+  workLocality: WorkLocality;
   /** Drive length of the chosen route, intersection to arrival vertex. */
   routeMeters: number;
   directionsText: string;
@@ -77,6 +88,9 @@ export interface ReverseGeocodeResult {
   state?: string;
   stateCode?: string;
   zip?: string;
+  /** County and locality whose boundaries contain the queried point. */
+  containingCounty?: string;
+  containingCity?: string;
   lat: number;
   lng: number;
 }

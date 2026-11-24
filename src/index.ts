@@ -10,6 +10,7 @@ export type {
   ProcessSiteOptions,
   SnappedPoint,
   ReverseGeocodeResult,
+  WorkLocality,
   RouteStep,
   RouteResult,
   FindIntersectionOptions,
@@ -28,3 +29,6 @@ export type { ManualDirectionsArgs } from "./directions/format.js";
 export { TicketGeoClient } from "./client.js";
 export { MAX_INTERSECTION_DISTANCE_METERS } from "./api/google.js";
 export { isLimitedAccessRoad } from "./selection.js";
+export { ticketLocality } from "./locality.js";
+export { parseWktRings, placeForWorkArea } from "./places.js";
+export type { NamedArea, PlaceMatch } from "./places.js";

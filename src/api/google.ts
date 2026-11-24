@@ -115,6 +115,8 @@ export async function reverseGeocode(
   lng: number
 ): Promise<ReverseGeocodeResult | null> {
   const results = await geocodeRequest(apiKey, { latlng: `${lat},${lng}` });
+  const containingCounty = containingAreaName(results, "administrative_area_level_2");
+  const containingCity = containingAreaName(results, "locality");
   for (const result of results) {
     const types = (result.types ?? []) as string[];
     if (types.includes("route") || types.includes("street_address")) {
@@ -127,6 +129,8 @@ export async function reverseGeocode(
           state: info.state,
           stateCode: info.stateCode,
           zip: info.zip,
+          containingCounty,
+          containingCity,
           lat: info.lat,
           lng: info.lng,
         };
@@ -134,6 +138,16 @@ export async function reverseGeocode(
     }
   }
   return null;
+}
+
+/**
+ * The name of the area of `type` that contains the queried point. A route result's
+ * own components describe the matched road, which can run into the next county.
+ */
+export function containingAreaName(results: Array<Record<string, unknown>>, type: string): string | undefined {
+  const area = results.find((r) => ((r.types ?? []) as string[]).includes(type));
+  const components = (area?.address_components ?? []) as Array<{ types: string[]; long_name: string }>;
+  return components.find((c) => c.types.includes(type))?.long_name;
 }
 
 export async function googleValidates(

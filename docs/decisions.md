@@ -111,6 +111,44 @@ The three long walks are field sites where no nearby vertex is closer to a road.
 timeout. Probes run at most 10 at a time: a burst past Google's per-second limit comes back
 empty rather than as an error.
 
+## Ticket county and place
+
+`SiteResult.workLocality` carries the ticket's county, place and zip; `intersection` keeps
+its own for the directions header. The shortest-drive intersection can sit across a county
+line: on ticket 2681951615 the site is in Richardson, Collin County, and Lookout Dr & Telecom
+Pkwy is 472 m away in Dallas County.
+
+The work area's county is read from the reverse geocode processSite already makes at the
+snapped road point, so it costs no request. A reverse geocode answers with the matched road
+first, then the areas that contain the queried point. The road result's own components
+describe the road, which can run into the next county: on 2681624558 (Frisco) it said Denton
+while the point is in Collin. So `ticketLocality` takes the containing
+`administrative_area_level_2` and `locality` first, then the road's, then the intersection's.
+
+Measured 2026-11-24 on 162 RPMx tickets (the 60 replay sites plus 102 more), against the
+county and place staff filed:
+
+| Source | County | Place |
+| --- | --- | --- |
+| Intersection (before) | 161 | 137 |
+| Road result at the snap point | 161 | 136 |
+| Containing area, else road (adopted) | 162 | 139 |
+
+Place stays fuzzy: Google's road result gives the postal city (Haslet for a Fort Worth
+address), no locality contains 41 of the 162 points, and staff filing differs too.
+
+**Texas 811's own places.** Texas 811 keeps a place list per county with boundaries, and
+its portal checks a ticket's place against the places the work area touches. Given those
+boundaries, `placeForWorkArea` returns the place covering most of the work area (a 400-point
+grid inside the polygon), or the nearest place when it lies in none. On the 162 tickets it
+passes that check on all 134 sites inside a place, against 128 for Google's city, and names
+the nearest town on the other 28, as staff did on 21 of them. Agreement with staff is 138
+(Google: 139); on 6 tickets staff named a city that Texas 811's map puts 98 to 100% of the work
+area outside. The package does not call Texas 811: the caller fetches the boundaries, and
+`workLocality.city` is the fallback when it can't.
+`locateWorkArea` serves callers that skip processSite (the API's manual-access flow) with one
+reverse geocode of the polygon centroid.
+
 ## Request cost
 
 **What Google bills** (Routes, Geocoding and Roads usage-and-billing and pricing pages, read

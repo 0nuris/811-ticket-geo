@@ -79,6 +79,36 @@ describe("reverseGeocode", () => {
     });
   });
 
+  it("reads the county and locality containing the point, apart from the road's", async () => {
+    const area = (type: string, name: string) => ({
+      types: [type, "political"],
+      address_components: [{ types: [type, "political"], long_name: name, short_name: name }],
+      geometry: { location: { lat: 33.1, lng: -96.83 } },
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        status: "OK",
+        results: [
+          {
+            types: ["route"],
+            address_components: [
+              { types: ["route"], long_name: "Newton Dr", short_name: "Newton Dr" },
+              { types: ["locality"], long_name: "Frisco", short_name: "Frisco" },
+              { types: ["administrative_area_level_2"], long_name: "Denton County", short_name: "Denton County" },
+            ],
+            geometry: { location: { lat: 33.1, lng: -96.834 } },
+          },
+          area("locality", "Frisco"),
+          area("administrative_area_level_2", "Collin County"),
+        ],
+      }),
+    });
+
+    const result = await reverseGeocode("test-key", 33.1, -96.83);
+    expect(result).toMatchObject({ county: "Denton County", containingCounty: "Collin County", containingCity: "Frisco" });
+  });
+
   it("returns null when no route/street_address result", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,

@@ -35,9 +35,19 @@ interface BoundingBox {
     northSouthFeet: number;
     eastWestFeet: number;
 }
+/** Where the work is, for the ticket's county, place and zip fields. */
+interface WorkLocality {
+    county: string;
+    city: string;
+    state: string;
+    stateCode: string;
+    zip: string;
+}
 interface SiteResult {
     coordinates: Coordinate[];
     intersection: Intersection;
+    /** The work area's own county and city; the intersection's can differ near a line. */
+    workLocality: WorkLocality;
     /** Drive length of the chosen route, intersection to arrival vertex. */
     routeMeters: number;
     directionsText: string;
@@ -67,6 +77,9 @@ interface ReverseGeocodeResult {
     state?: string;
     stateCode?: string;
     zip?: string;
+    /** County and locality whose boundaries contain the queried point. */
+    containingCounty?: string;
+    containingCity?: string;
     lat: number;
     lng: number;
 }
@@ -172,6 +185,8 @@ declare class TicketGeoClient {
     private remember;
     findNearestRoadPoint(coordinates: Coordinate[]): Promise<SnappedPoint[]>;
     reverseGeocode(lat: number, lng: number): Promise<ReverseGeocodeResult | null>;
+    /** The work area's own address components, for callers that skip processSite. */
+    locateWorkArea(coordinates: Coordinate[]): Promise<ReverseGeocodeResult | null>;
     geocodeIntersection(address: string, context?: IntersectionSearchContext): Promise<Intersection | null>;
     findNearestIntersection(lat: number, lng: number, options?: FindIntersectionOptions): Promise<Intersection | null>;
     computeRoute(origin: Coordinate, destination: Coordinate, heading?: number): Promise<RouteResult | null>;
@@ -231,4 +246,32 @@ declare const MAX_INTERSECTION_DISTANCE_METERS = 8000;
 /** Interstates, tollways and freeways; their frontage and service roads are local. */
 declare function isLimitedAccessRoad(name: string): boolean;
 
-export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSearchContext, type IntersectionSelectionResult, MAX_INTERSECTION_DISTANCE_METERS, type ManualDirectionsArgs, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, isLimitedAccessRoad, parseStreet, polygonAreaAcres, simplifyPolygon, streetsMatch, toPolygonWkt };
+/**
+ * The ticket's county, place and zip. A good intersection can sit across a county
+ * or city line from the work, so the area around the work wins and the
+ * intersection only fills what that leaves blank. See docs/decisions.md,
+ * "Ticket county and place".
+ */
+declare function ticketLocality(area: ReverseGeocodeResult | null, intersection: Intersection): WorkLocality;
+
+/** A named area such as a city, as rings parsed from its boundary. */
+interface NamedArea {
+    name: string;
+    rings: Coordinate[][];
+}
+interface PlaceMatch {
+    name: string;
+    /** Share of the work area inside the place; 0 when it lies in none and this is the nearest. */
+    share: number;
+    /** 0 when the work area overlaps the place. */
+    distanceMeters: number;
+}
+/** Every ring of a POLYGON or MULTIPOLYGON in longitude/latitude WKT, holes included. */
+declare function parseWktRings(wkt: string): Coordinate[][];
+/**
+ * The place covering most of the work area, or the nearest place when it lies in
+ * none (unincorporated). See docs/decisions.md, "Ticket county and place".
+ */
+declare function placeForWorkArea(workArea: Coordinate[], places: NamedArea[]): PlaceMatch | null;
+
+export { type BoundingBox, type ClientConfig, type Coordinate, type FindIntersectionOptions, type GeoMeasurement, type Intersection, type IntersectionSearchContext, type IntersectionSelectionResult, MAX_INTERSECTION_DISTANCE_METERS, type ManualDirectionsArgs, type NamedArea, type PlaceMatch, type ProcessSiteOptions, type ReverseGeocodeResult, type RouteResult, type RouteStep, type SelectIntersectionOptions, type SiteResult, type SnappedPoint, type StreetParts, TicketGeoClient, type WorkLocality, bearingToCardinal, boundingBoxFeet, formatDirections, formatManualDirections, formatMarkingText, geoMeasure, isLimitedAccessRoad, parseStreet, parseWktRings, placeForWorkArea, polygonAreaAcres, simplifyPolygon, streetsMatch, ticketLocality, toPolygonWkt };

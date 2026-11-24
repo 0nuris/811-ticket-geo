@@ -26,6 +26,7 @@ import {
   type GeoNamesCandidate,
 } from "./api/geonames.js";
 import { distanceToArea } from "./api/google.js";
+import { ticketLocality } from "./locality.js";
 import {
   isLimitedAccessRoad,
   eligibleRoadNames,
@@ -255,6 +256,13 @@ export class TicketGeoClient {
 
   async reverseGeocode(lat: number, lng: number): Promise<ReverseGeocodeResult | null> {
     return this.remember(`rev|${lat},${lng}`, () => apiReverseGeocode(this.googleApiKey, lat, lng));
+  }
+
+  /** The work area's own address components, for callers that skip processSite. */
+  async locateWorkArea(coordinates: Coordinate[]): Promise<ReverseGeocodeResult | null> {
+    if (coordinates.length === 0) return null;
+    const centroid = polygonCentroid(coordinates);
+    return this.reverseGeocode(centroid.lat, centroid.lng);
   }
 
   async geocodeIntersection(
@@ -776,6 +784,7 @@ export class TicketGeoClient {
     return {
       coordinates: orderedCoordinates,
       intersection,
+      workLocality: ticketLocality(snapRoadInfo, intersection),
       routeMeters: routeResult.distanceMeters,
       directionsText,
       markingText,

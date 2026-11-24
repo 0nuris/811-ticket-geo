@@ -652,6 +652,8 @@ async function findNearestRoadPoint(apiKey, coordinates) {
 }
 async function reverseGeocode(apiKey, lat, lng) {
   const results = await geocodeRequest(apiKey, { latlng: `${lat},${lng}` });
+  const containingCounty = containingAreaName(results, "administrative_area_level_2");
+  const containingCity = containingAreaName(results, "locality");
   for (const result of results) {
     const types = result.types ?? [];
     if (types.includes("route") || types.includes("street_address")) {
@@ -664,6 +666,8 @@ async function reverseGeocode(apiKey, lat, lng) {
           state: info.state,
           stateCode: info.stateCode,
           zip: info.zip,
+          containingCounty,
+          containingCity,
           lat: info.lat,
           lng: info.lng
         };
@@ -671,6 +675,11 @@ async function reverseGeocode(apiKey, lat, lng) {
     }
   }
   return null;
+}
+function containingAreaName(results, type) {
+  const area = results.find((r) => (r.types ?? []).includes(type));
+  const components = area?.address_components ?? [];
+  return components.find((c) => c.types.includes(type))?.long_name;
 }
 async function googleValidates(apiKey, street1, street2, context) {
   const parts = [context?.city, context?.stateCode].filter(Boolean);
@@ -944,6 +953,17 @@ async function findNearestIntersection(googleApiKey, geonamesUsername, lat, lng,
   return candidates[0] ?? null;
 }
 
+// src/locality.ts
+function ticketLocality(area, intersection) {
+  return {
+    county: area?.containingCounty || area?.county || intersection.county || "",
+    city: area?.containingCity || area?.city || intersection.city || "",
+    state: area?.state || intersection.state || "",
+    stateCode: area?.stateCode || intersection.stateCode || "",
+    zip: area?.zip || intersection.zip || ""
+  };
+}
+
 // src/selection.ts
 var ROUTE_PENALTY_METERS = {
   rampOrMerge: 500,
@@ -1211,6 +1231,12 @@ var TicketGeoClient = class {
   }
   async reverseGeocode(lat, lng) {
     return this.remember(`rev|${lat},${lng}`, () => reverseGeocode(this.googleApiKey, lat, lng));
+  }
+  /** The work area's own address components, for callers that skip processSite. */
+  async locateWorkArea(coordinates) {
+    if (coordinates.length === 0) return null;
+    const centroid = polygonCentroid(coordinates);
+    return this.reverseGeocode(centroid.lat, centroid.lng);
   }
   async geocodeIntersection(address, context) {
     return this.remember(
@@ -1590,18 +1616,109 @@ var TicketGeoClient = class {
     const directionsText = formatDirections(intersection, startCoordinate, routeResult, orderedCoordinates, finalApproach);
     const markingText = formatMarkingText(orderedCoordinates);
     const areaAcres = polygonAreaAcres(orderedCoordinates);
-    const boundingBox = boundingBoxFeet(orderedCoordinates);
+    const boundingBox2 = boundingBoxFeet(orderedCoordinates);
     return {
       coordinates: orderedCoordinates,
       intersection,
+      workLocality: ticketLocality(snapRoadInfo, intersection),
       routeMeters: routeResult.distanceMeters,
       directionsText,
       markingText,
       areaAcres,
-      boundingBox
+      boundingBox: boundingBox2
     };
   }
 };
+
+// src/places.ts
+var SAMPLE_POINTS = 400;
+function parseWktRings(wkt) {
+  return [...String(wkt).matchAll(/\(([^()]+)\)/g)].map(
+    (m) => m[1].split(",").map((pair) => {
+      const [lng, lat] = pair.trim().split(/\s+/).map(Number);
+      return { lat, lng };
+    })
+  );
+}
+function placeForWorkArea(workArea, places) {
+  const candidates = places.filter((p) => p.rings.length > 0).map((p) => ({ ...p, box: boundingBox(p.rings.flat()) }));
+  if (candidates.length === 0 || workArea.length === 0) return null;
+  const points = samplePoints(workArea);
+  const counts = /* @__PURE__ */ new Map();
+  for (const point of points) {
+    for (const place of candidates) {
+      if (inBox(point, place.box) && inRings(point, place.rings)) counts.set(place.name, (counts.get(place.name) ?? 0) + 1);
+    }
+  }
+  const [top] = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  if (top) return { name: top[0], share: top[1] / points.length, distanceMeters: 0 };
+  let best = null;
+  const byBox = candidates.map((p) => ({ place: p, bound: Math.min(...workArea.map((v) => boxDistanceMeters(v, p.box))) })).sort((a, b) => a.bound - b.bound);
+  for (const { place, bound } of byBox) {
+    if (best && bound >= best.distanceMeters) break;
+    const d = Math.min(...workArea.map((v) => ringsDistanceMeters(v, place.rings)));
+    if (!best || d < best.distanceMeters) best = { name: place.name, share: 0, distanceMeters: d };
+  }
+  return best;
+}
+function boundingBox(points) {
+  const lats = points.map((p) => p.lat);
+  const lngs = points.map((p) => p.lng);
+  return { minLat: Math.min(...lats), maxLat: Math.max(...lats), minLng: Math.min(...lngs), maxLng: Math.max(...lngs) };
+}
+function inBox(p, b) {
+  return p.lat >= b.minLat && p.lat <= b.maxLat && p.lng >= b.minLng && p.lng <= b.maxLng;
+}
+function inRings(p, rings) {
+  let inside = false;
+  for (const ring of rings) {
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const a = ring[i], b = ring[j];
+      if (a.lat > p.lat !== b.lat > p.lat && p.lng < (b.lng - a.lng) * (p.lat - a.lat) / (b.lat - a.lat) + a.lng) {
+        inside = !inside;
+      }
+    }
+  }
+  return inside;
+}
+function samplePoints(workArea) {
+  const box = boundingBox(workArea);
+  const step = Math.sqrt((box.maxLng - box.minLng) * (box.maxLat - box.minLat) / SAMPLE_POINTS);
+  const points = [];
+  if (step > 0) {
+    for (let lng = box.minLng + step / 2; lng < box.maxLng; lng += step) {
+      for (let lat = box.minLat + step / 2; lat < box.maxLat; lat += step) {
+        if (inRings({ lat, lng }, [workArea])) points.push({ lat, lng });
+      }
+    }
+  }
+  return points.length > 0 ? points : workArea;
+}
+var METERS_PER_DEGREE_LAT2 = 110540;
+function toMeters(p, refLat) {
+  return [p.lng * 111320 * Math.cos(refLat * Math.PI / 180), p.lat * METERS_PER_DEGREE_LAT2];
+}
+function segmentDistanceMeters(p, a, b) {
+  const [px, py] = toMeters(p, p.lat);
+  const [ax, ay] = toMeters(a, p.lat);
+  const [bx, by] = toMeters(b, p.lat);
+  const dx = bx - ax, dy = by - ay;
+  const len = dx * dx + dy * dy;
+  const t = len ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len)) : 0;
+  return Math.hypot(px - ax - t * dx, py - ay - t * dy);
+}
+function ringsDistanceMeters(p, rings) {
+  let best = Infinity;
+  for (const ring of rings) for (let i = 1; i < ring.length; i++) best = Math.min(best, segmentDistanceMeters(p, ring[i - 1], ring[i]));
+  return best;
+}
+function boxDistanceMeters(p, b) {
+  const lat = Math.max(b.minLat, Math.min(p.lat, b.maxLat));
+  const lng = Math.max(b.minLng, Math.min(p.lng, b.maxLng));
+  const [px, py] = toMeters(p, p.lat);
+  const [qx, qy] = toMeters({ lat, lng }, p.lat);
+  return Math.hypot(px - qx, py - qy);
+}
 export {
   MAX_INTERSECTION_DISTANCE_METERS,
   TicketGeoClient,
@@ -1613,9 +1730,12 @@ export {
   geoMeasure,
   isLimitedAccessRoad,
   parseStreet,
+  parseWktRings,
+  placeForWorkArea,
   polygonAreaAcres,
   simplifyPolygon,
   streetsMatch,
+  ticketLocality,
   toPolygonWkt
 };
 //# sourceMappingURL=index.js.map
